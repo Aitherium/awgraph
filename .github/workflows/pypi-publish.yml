@@ -1,0 +1,48 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+  # Manual re-run. Two uses: re-driving a publish after a transient PyPI/network
+  # failure without cutting a new release, and EXERCISING this workflow's own
+  # gate — `skip-existing: true` below makes a re-run of an already published
+  # version a no-op upload, so the moat guard can be proven without polluting
+  # the index with a throwaway version.
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package + test tools
+        run: |
+          pip install build
+          pip install -e .
+          pip install pytest pytest-asyncio pytest-timeout
+      - name: Run the test suite before publishing
+        # A RED CI has never blocked a publish here — CI runs on push to main,
+        # this workflow runs on `release: published`, and nothing connects them.
+        # So the suite runs IN this workflow, on the artifact that will ship.
+        run: python -m pytest tests/ -q --timeout=180
+      - name: Build package
+        run: python -m build
+      - name: Moat guard (inspect built wheel + sdist)
+        # Defense-in-depth: fail the publish if the built artifacts leak a
+        # residual AitherOS-platform import (the standalone package is
+        # self-contained by contract — the monorepo copy is the only place
+        # platform internals are allowed) or ship bytecode/junk.
+        run: python scripts/check_moat_boundary.py
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
