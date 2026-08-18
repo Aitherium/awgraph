@@ -5,6 +5,26 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-08-18
+
+### Fixed
+
+- **`awgraph mcp` was broken on every clean install of 1.2.0.** The module was
+  written against the `mcp` 1.x server API (`Server` with `@list_tools()` /
+  `@call_tool()` decorators), which **2.0 removed** — so `build_server()` raised
+  `AttributeError: 'Server' object has no attribute 'list_tools'`. It passed its
+  tests locally, where 1.x happened to be installed, and failed for anyone whose
+  pip resolved `mcp>=1.0` to 2.0, which by then was everyone.
+
+  Rewritten for the 2.x `MCPServer` API and the dependency **pinned to `mcp>=2.0`**
+  so the tested version and the shipped version are the same one. The tests now
+  drive the server's own `list_tools()` / `call_tool()` rather than reaching into
+  its internal handler registry, which is what coupled them to one SDK generation
+  and let a broken build look green.
+
+  Caught by installing the built wheel into a clean venv and running it — the
+  check that a source-tree test structurally cannot perform.
+
 ## [1.2.0] - 2026-08-18
 
 ### Added

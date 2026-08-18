@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "awgraph"
-version = "1.2.0"
+version = "1.2.1"
 description = "Semantic Python code graph — AST indexing, call graphs, and hybrid search for Python codebases."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,7 +24,11 @@ dev = ["pytest>=7.0", "pytest-asyncio>=0.21.0"]
 # `awgraph mcp` — serve the graph to any MCP coding agent (Claude Code, Cursor,
 # Windsurf, Zed) over stdio. Optional because the library and CLI need nothing
 # beyond httpx.
-mcp = ["mcp>=1.0"]
+# Pinned to 2.x: the 1.x server API (`Server` with @list_tools/@call_tool
+# decorators) was REMOVED in 2.0, so code written for one raises AttributeError
+# on the other. `mcp>=1.0` let pip resolve 2.0 against a module written for 1.x
+# — it passed tests locally and failed on every clean install.
+mcp = ["mcp>=2.0"]
 
 [project.scripts]
 awgraph = "awgraph.cli:main"
