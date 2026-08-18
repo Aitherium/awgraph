@@ -11,6 +11,36 @@ import tempfile
 from pathlib import Path
 
 
+def _pyproject_version() -> str:
+    """The version pyproject declares, or the installed distribution's.
+
+    Both cases are real: the test runs from the source tree in CI (pyproject is
+    two directories up) and against an installed wheel elsewhere (no pyproject
+    at all). Returning a sentinel on failure would make the parity assertion
+    vacuously true, so it raises instead — an unanswerable question is not a pass.
+    """
+    import tomllib
+
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "pyproject.toml"
+        if candidate.is_file():
+            data = tomllib.loads(candidate.read_text(encoding="utf-8"))
+            version = data.get("project", {}).get("version")
+            if version:
+                return str(version)
+            raise AssertionError("pyproject.toml declares no [project].version")
+
+    from importlib.metadata import PackageNotFoundError, version as dist_version
+
+    try:
+        return dist_version("awgraph")
+    except PackageNotFoundError as exc:
+        raise AssertionError(
+            "no pyproject.toml above {} and awgraph is not installed — cannot "
+            "check version parity".format(here)) from exc
+
+
 def test_import_standalone():
     """Verify awgraph imports without AitherOS."""
     # Should not raise ImportError
@@ -19,7 +49,14 @@ def test_import_standalone():
 
     assert CodeGraph is not None
     assert CodeGraphRegistry is not None
-    assert awgraph.__version__ == "1.0.0"
+    # Assert PARITY with pyproject, never a literal. A hardcoded version here
+    # fails on every release while asserting nothing anyone cares about — it
+    # blocked the 1.1.0 publish after the release was already cut. What is worth
+    # checking is that the two places declaring a version agree, because when
+    # they disagree pip installs one number and `__version__` reports another.
+    assert awgraph.__version__ == _pyproject_version(), (
+        "awgraph.__version__ ({}) disagrees with pyproject.toml ({})".format(
+            awgraph.__version__, _pyproject_version()))
 
 
 async def test_basic_indexing():
