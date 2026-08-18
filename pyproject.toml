@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "awgraph"
-version = "1.1.0"
+version = "1.2.0"
 description = "Semantic Python code graph — AST indexing, call graphs, and hybrid search for Python codebases."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,6 +20,11 @@ numpy = ["numpy>=1.21.0"]
 
 # Development and testing
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21.0"]
+
+# `awgraph mcp` — serve the graph to any MCP coding agent (Claude Code, Cursor,
+# Windsurf, Zed) over stdio. Optional because the library and CLI need nothing
+# beyond httpx.
+mcp = ["mcp>=1.0"]
 
 [project.scripts]
 awgraph = "awgraph.cli:main"

@@ -59,10 +59,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from awgraph.base import BaseFacultyGraph, GraphSyncConfig
-import httpx
-AsyncClient = httpx.AsyncClient
-from awgraph.degradation import get_registry, SubsystemTier
-_reg = get_registry()  # noqa: E402
+from awgraph import plugins as _plugins
+from awgraph.degradation import SubsystemTier
+
+# Host-overridable via awgraph.plugins.configure(). Read ONCE at import, so a
+# host must configure before importing this module — stated in plugins.py.
+# Defaults are the standalone behaviour: httpx and awgraph's own registry.
+AsyncClient = _plugins.async_client_class()
+_reg = _plugins.degradation_registry()
 
 # Optional: numpy for fast vector operations
 try:
@@ -91,13 +95,16 @@ def _as_f32(vec):
         return np.asarray(vec, dtype=np.float32)
     return vec if isinstance(vec, array) else array("f", vec)
 
-# Embedding engine — routes to sentence-transformers or vLLM (no Ollama)
-# In the public package, embeddings must be provided externally via plugin hooks
+# Embedding engine. None unless a host installs one via
+# awgraph.plugins.configure(embedding_engine=...); without it hybrid_query
+# degrades to keyword-only scoring, which is SILENT — it still returns ten
+# confident results. Hosts that require semantic search should assert
+# awgraph.plugins.embeddings_configured() at startup rather than find out later.
 def get_embedding_engine():
-    """No-op: embeddings not available in public package."""
-    return None
+    """The host's embedding engine, or None when none is configured."""
+    return _plugins.embedding_engine()
 
-_HAS_EMBEDDING_ENGINE = False
+_HAS_EMBEDDING_ENGINE = _plugins.embeddings_configured()
 
 # Optional: vLLM backend (OpenAI-compatible API for generation)
 _vllm_url: Optional[str] = None
@@ -264,7 +271,9 @@ async def _llm_generate(prompt: str, model: str = ELASTIC_REFLEX,
 
 _HAS_LLM = True  # At least one backend check succeeded at call time
 
-logger = get_logger("CodeGraph")
+# Host-overridable: awgraph.plugins.configure(logger_factory=...). Falls back
+# to awgraph.logging (stdlib) when no host has installed one.
+logger = _plugins.get_logger("CodeGraph")
 
 
 # ============================================================================

@@ -5,6 +5,45 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-08-18
+
+### Added
+
+- **An MCP server: `awgraph mcp`.** One line of config and any MCP coding agent
+  (Claude Code, Cursor, Windsurf, Zed) gains structural code search — symbols,
+  signatures, callers and callees — instead of pasting grep output into its own
+  context:
+
+      pip install "awgraph[mcp]"
+      {"mcpServers": {"awgraph": {"command": "awgraph", "args": ["mcp"]}}}
+
+  Five tools: `code_index`, `code_search`, `code_callers`, `code_calls`,
+  `code_stats`. Every design choice fights one failure — an agent that cannot
+  tell "nothing matched" from "nothing is indexed" concludes the repository does
+  not contain what it is looking for and stops. So an unindexed search names
+  `code_index`, an unknown symbol says so, a tree with no Python says so, and
+  `code_stats` always reports embedding coverage, saying "keyword-only" at 0%.
+  Indexing is never implicit: auto-indexing would turn a missing index into a
+  multi-minute pause that reads as a hung tool call.
+- **`awgraph.plugins` — the host integration points this package has advertised
+  since 1.0.0 while the module did not exist** and `plugins/` was an empty
+  directory. `configure(logger_factory=..., async_client=..., embedding_engine=...,
+  degradation_registry=...)` lets a host inject its own implementations instead
+  of forking the engine. An unknown hook name RAISES rather than being ignored: a
+  typo'd `embeddings_engine=` that silently did nothing would look exactly like a
+  host that never configured one.
+
+### Changed
+
+- **`import awgraph` is now lazy** (PEP 562). This is not tidiness — it is what
+  makes the hooks work at all. The engine snapshots its hooks at import time, and
+  the previous eager `from awgraph.graph import ...` in `__init__` meant
+  `import awgraph.plugins` loaded the engine BEFORE `configure()` could run.
+  Measured: `configure()` returned cleanly and `active_hooks()` reported all four
+  installed while the engine was still on httpx with embeddings off. It also
+  makes importing the package cheap for anything that only wants the version or
+  the plugin surface.
+
 ## [1.1.0] - 2026-08-18
 
 ### Added

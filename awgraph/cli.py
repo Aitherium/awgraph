@@ -308,11 +308,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_self = sub.add_parser("selftest",
                             help="prove this install indexes and retrieves")
     p_self.set_defaults(func=cmd_selftest)
+
+    sub.add_parser("mcp", help="serve over MCP stdio for a coding agent")
     return ap
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.cmd == "mcp":
+        # Not routed through asyncio.run below: the MCP server owns its own loop
+        # and blocks until the client disconnects.
+        from awgraph.mcp_server import main as mcp_main
+
+        return mcp_main()
     try:
         return asyncio.run(args.func(args))
     except KeyboardInterrupt:

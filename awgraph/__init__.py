@@ -52,12 +52,41 @@ Plugin support via awgraph.plugins (not yet public).
 
 from __future__ import annotations
 
-from awgraph.graph import CodeGraph, CodeChunk
-from awgraph.registry import CodeGraphRegistry, get_codegraph_registry
-from awgraph.store import CodeGraphStore
+# LAZY on purpose (PEP 562). `awgraph.plugins` documents that a host must
+# configure its hooks BEFORE the engine is imported, because the engine snapshots
+# them at import time. Eagerly importing `awgraph.graph` here made that
+# impossible: `import awgraph.plugins` executes this file first, so the engine was
+# always already imported and every hook was silently ignored — configure()
+# returned cleanly, the registry reported the hooks installed, and the engine ran
+# on defaults. Measured while binding the platform: the HTTP client stayed httpx
+# and _HAS_EMBEDDING_ENGINE stayed False with all four hooks reporting active.
+#
+# It also makes `import awgraph` cheap for anything that only wants the plugin
+# surface or the version.
 from awgraph.base import BaseFacultyGraph, GraphSyncConfig
 
-__version__ = "1.1.0"
+_LAZY = {
+    "CodeGraph": "awgraph.graph",
+    "CodeChunk": "awgraph.graph",
+    "CodeGraphRegistry": "awgraph.registry",
+    "get_codegraph_registry": "awgraph.registry",
+    "CodeGraphStore": "awgraph.store",
+}
+
+
+def __getattr__(name):
+    module = _LAZY.get(name)
+    if module is None:
+        raise AttributeError(f"module 'awgraph' has no attribute {name!r}")
+    import importlib
+
+    return getattr(importlib.import_module(module), name)
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY))
+
+__version__ = "1.2.0"
 
 __all__ = [
     "CodeGraph",

@@ -133,6 +133,28 @@ embedding backend `hybrid_query` silently falls back to keyword scoring and
 still returns ten confident-looking results, so "is the semantic half actually
 on?" is a question you should never have to answer by reading the source.
 
+## Use it from a coding agent (MCP)
+
+```
+pip install "awgraph[mcp]"
+```
+
+then one line in your client's MCP config — Claude Code, Cursor, Windsurf, Zed:
+
+```json
+{"mcpServers": {"awgraph": {"command": "awgraph", "args": ["mcp"]}}}
+```
+
+Your agent gains `code_index`, `code_search`, `code_callers`, `code_calls` and
+`code_stats`. It searches by meaning and gets back symbols with file, line,
+signature, calls and callers — rather than pasting file text into its own
+context, which is the cost this package exists to remove.
+
+Index once per repository (`code_index`); it is cached on disk **outside** the
+repo. Indexing is never implicit: a search against an unindexed repo tells the
+agent to index rather than pausing for minutes, because a long silent call reads
+as a hang and usually gets killed.
+
 ## Use it from Python
 
 ```python
