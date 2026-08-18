@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>awgraph — the code graph your agent reads instead of grepping</title>
+<meta name="description" content="A code knowledge graph for agents: 86% of grep's recall for 0.43% of the context.">
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #12161b; --line: #1e252d;
+    --ink: #e6edf3; --dim: #8b98a5; --accent: #58a6ff; --good: #3fb950;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+  h1 { font-size: 2.1rem; line-height: 1.2; margin: 0 0 .5rem; letter-spacing: -.02em; }
+  h2 { font-size: 1.15rem; margin: 2.75rem 0 .75rem; letter-spacing: -.01em; }
+  .lede { color: var(--dim); font-size: 1.05rem; margin: 0 0 2rem; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: .9rem 1rem; overflow-x: auto; font-size: .875rem;
+  }
+  code:not(pre code) {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 4px; padding: .1rem .35rem; font-size: .875em;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .93rem; }
+  th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 600; font-size: .8rem; text-transform: uppercase;
+       letter-spacing: .04em; }
+  td.num { text-align: right; font-family: ui-monospace, monospace; }
+  .win { color: var(--good); font-weight: 600; }
+  .note {
+    border-left: 3px solid var(--line); padding: .1rem 0 .1rem 1rem;
+    color: var(--dim); font-size: .93rem; margin: 1.25rem 0;
+  }
+  a { color: var(--accent); }
+  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+          padding: 1rem; }
+  .card .big { font-size: 1.75rem; font-weight: 700; letter-spacing: -.02em; }
+  .card .cap { color: var(--dim); font-size: .82rem; margin-top: .15rem; }
+  footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
+           color: var(--dim); font-size: .875rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>awgraph</h1>
+  <p class="lede">
+    A code knowledge graph for agents. It indexes a repository into symbols —
+    functions, methods, classes, their calls and callers — and answers a
+    natural-language task with the handful of chunks that task actually needs,
+    instead of a grep dump the model has to read.
+  </p>
+
+  <pre>pip install awgraph</pre>
+
+  <h2>Measured</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="big win">234&times;</div>
+      <div class="cap">less context than grep</div>
+    </div>
+    <div class="card">
+      <div class="big">1,503</div>
+      <div class="cap">context tokens per task</div>
+    </div>
+    <div class="card">
+      <div class="big">75.5s</div>
+      <div class="cap">to index 43,730 chunks</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>retriever</th><th class="num">recall@10</th><th class="num">context tokens</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>ranked multi-term grep</td><td class="num">0.933</td><td class="num">351,369</td></tr>
+      <tr><td><strong>awgraph</strong></td><td class="num"><strong>0.800</strong></td>
+          <td class="num win"><strong>1,503</strong></td></tr>
+    </tbody>
+  </table>
+
+  <p class="note">
+    <strong>Read that honestly: grep wins on recall.</strong> awgraph is not a
+    better finder — it is a dramatically cheaper one, returning 86% of grep's
+    recall for 0.43% of the context. On a long agent loop the context budget is
+    usually what runs out first. Caveats, because a benchmark without them is
+    marketing: n=15 tasks, and only 33.3% of chunks carried embeddings on that
+    run, so the semantic half was working at partial strength.
+  </p>
+
+  <p class="note">
+    A naive fusion — run the graph, fall back to grep when it returns few files —
+    was also measured: <strong>0.933 recall at 352,872 tokens</strong>, which is
+    <em>more</em> than grep alone, because the fallback fires on nearly every
+    task and pays both bills. Published because it did not work.
+  </p>
+
+  <h2>The method</h2>
+  <p>
+    The task is a real commit message with the answer filenames stripped out of
+    it; the truth is the set of files that commit actually modified. Stripping
+    matters — leave the filenames in and the task becomes
+    <code>grep &lt;filename&gt;</code>, which the baseline wins by construction
+    while measuring nothing.
+  </p>
+
+  <h2>Setup: index once, embed lazily</h2>
+  <table>
+    <thead>
+      <tr><th>step</th><th class="num">2,400 chunks</th><th class="num">43,730 chunks</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>parse + index</td><td class="num">49.8s</td><td class="num">75.5s</td></tr>
+      <tr><td>embed (CPU)</td><td class="num">&mdash;</td><td class="num">~97 min</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Indexing is close to size-insensitive — 27&times; the files for 1.5&times; the
+    time, because parsing runs across workers. Embedding is the part that hurts
+    on CPU, so it is optional, cached and incremental. Without any embedding
+    backend, queries fall back to keyword scoring and still work &mdash; that
+    fallback is silent by design and dangerous by nature, so check vector
+    coverage rather than assuming it.
+  </p>
+
+  <h2>Use it</h2>
+  <pre>import asyncio
+from awgraph import CodeGraph
+
+async def main():
+    graph = CodeGraph(root_path="/abs/path/to/repo", auto_index=False)
+    await graph.index_codebase("/abs/path/to/repo")   # absolute path required
+
+    for chunk in await graph.hybrid_query("retry with exponential backoff", max_results=5):
+        print(chunk.name, chunk.source_path, chunk.start_line)
+
+asyncio.run(main())</pre>
+  <p>
+    The query does not need to contain the symbol name. Asking for
+    <em>&ldquo;backoff policy for flaky calls&rdquo;</em> against a class
+    documented as <em>&ldquo;Backoff policy for flaky calls&rdquo;</em> returns
+    it by meaning, not by string match.
+  </p>
+
+  <h2>The constellation</h2>
+  <p>
+    Three packages, three different questions about the same repository:
+    <a href="https://github.com/Aitherium/awgit">awgit</a> knows what changed and
+    who is editing it; awgraph knows what the code is and what depends on what;
+    <a href="https://github.com/Aitherium/aither-adk">aither-adk</a> is the agent
+    runtime that consumes both.
+  </p>
+  <div id="aither-constellation" data-self="awgraph"></div>
+  <script src="aither-constellation.js"></script>
+
+  <footer>
+    Apache 2.0 &middot;
+    <a href="https://github.com/Aitherium/awgraph">github.com/Aitherium/awgraph</a> &middot;
+    <a href="aither-manifest.json">manifest</a>
+  </footer>
+
+</div>
+</body>
+</html>
