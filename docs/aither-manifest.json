@@ -8,7 +8,8 @@
   "language": "Python",
   "license": "Apache-2.0",
   "install": {
-    "pip": "pip install awgraph"
+    "pip": "pip install awgraph",
+    "cli": "awgraph index . && awgraph query \"...\""
   },
   "tags": [
     "code-graph",
@@ -18,27 +19,35 @@
     "static-analysis"
   ],
   "metrics": {
-    "context reduction vs grep": {
-      "value": 234,
+    "context reduction at equal recall": {
+      "value": 16,
       "unit": "x",
-      "as_of": "2026-08-18T00:41:50Z"
+      "as_of": "2026-08-18T11:40:00Z"
     },
-    "recall@10": {
-      "value": 0.8,
-      "as_of": "2026-08-18T00:41:50Z"
+    "recall@400": {
+      "value": 1.0,
+      "as_of": "2026-08-18T11:40:00Z"
     },
-    "context tokens per task": {
-      "value": 1503,
-      "as_of": "2026-08-18T00:41:50Z"
+    "tokens at recall 1.000": {
+      "value": 45269,
+      "as_of": "2026-08-18T11:40:00Z"
     },
-    "grep baseline tokens per task": {
-      "value": 351369,
-      "as_of": "2026-08-18T00:41:50Z"
+    "grep tokens at recall 1.000": {
+      "value": 668299,
+      "as_of": "2026-08-18T11:40:00Z"
+    },
+    "recall@25": {
+      "value": 0.939,
+      "as_of": "2026-08-18T11:40:00Z"
+    },
+    "tokens at k=25": {
+      "value": 3132,
+      "as_of": "2026-08-18T11:40:00Z"
     },
     "index throughput": {
       "value": 43730,
       "unit": "chunks in 75.5s",
-      "as_of": "2026-08-18T00:41:50Z"
+      "as_of": "2026-08-18T11:40:00Z"
     }
   },
   "links": {
@@ -46,11 +55,14 @@
     "ecosystem": "https://github.com/Aitherium/awgraph/blob/main/docs/ECOSYSTEM.md"
   },
   "notes": [
-    "Metrics are retrieval measurements over 15 real commits with k=10, where the task is a commit message with answer filenames stripped and the truth is the files that commit modified.",
-    "grep scored HIGHER recall (0.933 vs 0.800). The claim here is cost, not superiority: 86% of grep's recall for 0.43% of its context.",
-    "Embedding coverage on that run was 33.3%, so the recall figure understates the semantic half.",
-    "A naive graph-then-grep fusion was measured at 0.933 recall / 352,872 tokens - more expensive than grep alone, because the fallback fires on nearly every task. Recorded because it did not work."
+    "Retrieval measured over 33 real commits: the task is a commit message with answer filenames stripped, the truth is the files that commit modified.",
+    "k is swept for BOTH retrievers, because k bounds grep's output too - sweeping it for one arm only manufactures a win, and an earlier published version did exactly that.",
+    "grep is the better FINDER at any matched k (1.000 at k=50 vs awgraph 0.939). The claim is cost: awgraph reaches the same 1.000 ceiling for 16x less context, and grep's 668k tokens/task at full recall does not fit most context windows.",
+    "awgraph's token counts are previews (signature + docstring + body excerpt); an agent reading its top hits in full pays more. grep's figure is whole files.",
+    "REFUTED: embedding coverage was not the gap - 33.3% -> 100% coverage moved recall@10 only 0.800 -> 0.803.",
+    "DID NOT WORK: naive graph-then-grep fusion scored 0.894 at 348,389 tokens, because a fallback keyed on result COUNT fires when the graph is confidently wrong and stays quiet when it is confidently right.",
+    "n=33, one repository, Python only."
   ],
-  "version": "1.0.0",
-  "generated_at": "2026-08-18T00:41:50Z"
+  "version": "1.1.0",
+  "generated_at": "2026-08-18T11:40:00Z"
 }

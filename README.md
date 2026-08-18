@@ -15,31 +15,55 @@ Python 3.10+. Nothing else is required to index and query.
 ## What it costs, measured
 
 The interesting question is not "is a graph better than grep" — it is *what does
-each cost*. Measured on a corpus of real commits, where the task is a commit
-message with the answer filenames stripped out and the truth is the set of files
-that commit actually modified:
+each cost to reach the same answer*. Measured on 33 real commits, where the task
+is a commit message with the answer filenames stripped out and the truth is the
+set of files that commit actually modified. `k` is the result budget, and it is
+swept for **both** retrievers, because `k` bounds grep's output too — sweeping it
+for only one arm manufactures a win:
 
-| retriever | recall@10 | context tokens per task |
-|---|---|---|
-| ranked multi-term grep | 0.933 | 351,369 |
-| **awgraph** | **0.800** | **1,503** |
+| k | awgraph recall | awgraph tokens | grep recall | grep tokens | awgraph cheaper by |
+|---|---|---|---|---|---|
+| 10 | 0.803 | 1,311 | 0.924 | 351,427 | 268x |
+| 25 | 0.939 | 3,132 | 0.985 | 504,640 | 161x |
+| 50 | 0.939 | 6,158 | **1.000** | 668,299 | 109x |
+| 100 | 0.939 | 12,059 | 1.000 | 735,727 | 61x |
+| 200 | 0.939 | 23,386 | 1.000 | 735,727 | 31x |
+| 400 | **1.000** | 45,269 | 1.000 | 735,727 | **16x** |
 
-**86% of grep's recall for 0.43% of the context — a 234x reduction.**
+**awgraph reaches the same ceiling as exhaustive grep — recall 1.000 — for 16x
+less context. At every budget in between it costs 16-268x fewer tokens.**
 
-Read that honestly: **grep still wins on recall.** awgraph is not a better
-*finder*; it is a dramatically cheaper one, and on a long agent loop the context
-budget is usually what runs out first. If you need maximum recall and cost is no
-object, grep. If you are paying per token across thousands of turns, this is a
-different order of magnitude.
+Read it honestly, because the shape matters:
 
-Caveats, because a benchmark without them is marketing: n=15 tasks, and only
-33.3% of chunks carried embeddings on that run, so the semantic half was working
-at partial strength — the recall number understates it.
+- **grep is the better finder at any matched `k`.** It reaches 1.000 at k=50
+  while awgraph is still at 0.939. awgraph is not more accurate; it is
+  dramatically cheaper for the same eventual answer, and on a long agent loop
+  the context budget is what runs out first.
+- **grep's cost is not a rounding error.** Reaching 1.000 costs it 668k tokens
+  per task — more than most models will accept in one window at all. That is the
+  real argument: not that grep is worse, but that at full recall it does not fit.
+- **awgraph's token count is for previews**, not whole function bodies —
+  signature + docstring + a body preview per chunk. An agent that then reads the
+  full body of its top hits pays more than the number above. grep's figure is
+  whole files, which is what an agent actually has to read. The comparison is
+  fair at the *retrieval* step and generous to awgraph after it.
 
-A naive fusion (run the graph, fall back to grep when it returns few files) was
-also measured: it reaches grep's 0.933 recall at 352,872 tokens — *more* than
-grep alone, because the fallback fires on nearly every task and pays both bills.
-Reported because it did not work; a smarter trigger is future work.
+Caveats, because a benchmark without them is marketing: n=33, one repository,
+Python only, and `k` is a knob a caller chooses rather than something the tool
+tunes for itself.
+
+Two things measured and **not** confirmed, recorded because a benchmark that
+only reports its wins is an advertisement:
+
+- **Embedding coverage was not the gap.** Going from 33.3% of chunks carrying
+  vectors to 100% moved recall@10 from 0.800 to 0.803. The earlier claim that
+  partial coverage understated the result is refuted.
+- **A naive fusion did not work.** Run the graph, fall back to grep when it
+  returns few files: 0.894 recall at 348,389 tokens — worse recall than grep AND
+  nearly grep's full cost, because the fallback fires on almost every task and
+  pays both bills. A trigger keyed on result *count* cannot help; it fires when
+  the graph is confidently wrong and stays quiet when the graph is confidently
+  right. Keying it on score instead is untested future work.
 
 ## Setup: index once, embed lazily
 
@@ -65,7 +89,38 @@ embedded = sum(1 for c in graph.chunks.values() if c.embedding is not None)
 print(f"{embedded}/{len(graph.chunks)} chunks carry vectors")
 ```
 
-## Use it
+## Use it from the terminal
+
+```
+pip install awgraph
+
+awgraph index .                          # parse + persist an index for this repo
+awgraph query "retry with exponential backoff"
+awgraph callers send_request             # who calls this
+awgraph calls send_request               # what does this call
+awgraph stats                            # what is in the index
+awgraph selftest                         # prove the install works
+```
+
+`query` prints `path:line  [type] name` and the signature, so results paste
+straight into an editor. `--json` on any read command gives machine-readable
+output for wiring into a tool loop.
+
+Exit codes are meaningful: **0** success, **1** a real negative answer (no
+match), **2** the command could not run at all — so a script can tell "nothing
+matched" from "there is no index yet", which are different problems with
+different fixes.
+
+The index is cached **outside your repository** — under `AWGRAPH_CACHE_DIR` if
+set, otherwise the platform user-cache directory, keyed by a digest of the
+absolute repo path. Nothing is written into the tree you point it at.
+
+`awgraph stats` always prints embedding coverage, including `0.0%`. Without an
+embedding backend `hybrid_query` silently falls back to keyword scoring and
+still returns ten confident-looking results, so "is the semantic half actually
+on?" is a question you should never have to answer by reading the source.
+
+## Use it from Python
 
 ```python
 import asyncio

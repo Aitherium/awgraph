@@ -64,12 +64,12 @@
   <h2>Measured</h2>
   <div class="grid">
     <div class="card">
-      <div class="big win">234&times;</div>
-      <div class="cap">less context than grep</div>
+      <div class="big win">16&times;</div>
+      <div class="cap">less context for the SAME recall as grep</div>
     </div>
     <div class="card">
-      <div class="big">1,503</div>
-      <div class="cap">context tokens per task</div>
+      <div class="big">1.000</div>
+      <div class="cap">recall@400, matching exhaustive grep</div>
     </div>
     <div class="card">
       <div class="big">75.5s</div>
@@ -79,29 +79,62 @@
 
   <table>
     <thead>
-      <tr><th>retriever</th><th class="num">recall@10</th><th class="num">context tokens</th></tr>
+      <tr><th>k</th><th class="num">awgraph recall</th><th class="num">tokens</th>
+          <th class="num">grep recall</th><th class="num">tokens</th><th class="num">cheaper</th></tr>
     </thead>
     <tbody>
-      <tr><td>ranked multi-term grep</td><td class="num">0.933</td><td class="num">351,369</td></tr>
-      <tr><td><strong>awgraph</strong></td><td class="num"><strong>0.800</strong></td>
-          <td class="num win"><strong>1,503</strong></td></tr>
+      <tr><td>10</td><td class="num">0.803</td><td class="num">1,311</td>
+          <td class="num">0.924</td><td class="num">351,427</td><td class="num">268&times;</td></tr>
+      <tr><td>25</td><td class="num">0.939</td><td class="num">3,132</td>
+          <td class="num">0.985</td><td class="num">504,640</td><td class="num">161&times;</td></tr>
+      <tr><td>50</td><td class="num">0.939</td><td class="num">6,158</td>
+          <td class="num"><strong>1.000</strong></td><td class="num">668,299</td><td class="num">109&times;</td></tr>
+      <tr><td>100</td><td class="num">0.939</td><td class="num">12,059</td>
+          <td class="num">1.000</td><td class="num">735,727</td><td class="num">61&times;</td></tr>
+      <tr><td>200</td><td class="num">0.939</td><td class="num">23,386</td>
+          <td class="num">1.000</td><td class="num">735,727</td><td class="num">31&times;</td></tr>
+      <tr><td>400</td><td class="num win"><strong>1.000</strong></td><td class="num win"><strong>45,269</strong></td>
+          <td class="num">1.000</td><td class="num">735,727</td><td class="num win"><strong>16&times;</strong></td></tr>
     </tbody>
   </table>
 
   <p class="note">
-    <strong>Read that honestly: grep wins on recall.</strong> awgraph is not a
-    better finder — it is a dramatically cheaper one, returning 86% of grep's
-    recall for 0.43% of the context. On a long agent loop the context budget is
-    usually what runs out first. Caveats, because a benchmark without them is
-    marketing: n=15 tasks, and only 33.3% of chunks carried embeddings on that
-    run, so the semantic half was working at partial strength.
+    <strong>awgraph reaches the same ceiling as exhaustive grep &mdash; recall
+    1.000 &mdash; for 16&times; less context</strong>, and costs 16&ndash;268&times;
+    fewer tokens at every budget in between. <code>k</code> is swept for
+    <em>both</em> retrievers, because <code>k</code> bounds grep's output too;
+    sweeping it for only one arm manufactures a win, and an earlier version of
+    this page did exactly that.
   </p>
 
   <p class="note">
-    A naive fusion — run the graph, fall back to grep when it returns few files —
-    was also measured: <strong>0.933 recall at 352,872 tokens</strong>, which is
-    <em>more</em> than grep alone, because the fallback fires on nearly every
-    task and pays both bills. Published because it did not work.
+    <strong>Read the shape honestly.</strong> grep is the better <em>finder</em>
+    at any matched <code>k</code> &mdash; it hits 1.000 at k=50 while awgraph is
+    still at 0.939. The argument is not that grep is worse; it is that at full
+    recall grep needs 668k tokens per task, which does not fit in most context
+    windows at all. Note also that awgraph's tokens are <em>previews</em>
+    (signature + docstring + a body excerpt), so an agent that then reads its top
+    hits in full pays more than the figure shown; grep's number is whole files,
+    which is what an agent really has to read.
+  </p>
+
+  <p class="note">
+    Two results recorded because they did <strong>not</strong> work.
+    <strong>Embedding coverage was not the gap</strong>: going from 33.3% of
+    chunks carrying vectors to 100% moved recall@10 from 0.800 to 0.803, refuting
+    the earlier claim that partial coverage understated the number. And a
+    <strong>naive graph-then-grep fusion</strong> scored 0.894 at 348,389 tokens
+    &mdash; worse recall than grep and nearly its full cost, because a fallback
+    keyed on result <em>count</em> fires when the graph is confidently wrong and
+    stays quiet when it is confidently right.
+  </p>
+
+  <p class="note">
+    Caveats, because a benchmark without them is marketing: <strong>n=33</strong>
+    real commits, one repository, Python only, and <code>k</code> is a budget a
+    caller chooses rather than something the tool tunes for itself. Every number
+    on this page is reproducible from
+    <code>codegraph_task_context_ab.py --embed --sweep 10,25,50,100,200,400</code>.
   </p>
 
   <h2>The method</h2>
@@ -132,7 +165,26 @@
     coverage rather than assuming it.
   </p>
 
-  <h2>Use it</h2>
+  <h2>Use it from the terminal</h2>
+  <pre>pip install awgraph
+
+awgraph index .                          # parse + persist an index for this repo
+awgraph query "retry with exponential backoff"
+awgraph callers send_request             # who calls this
+awgraph calls send_request               # what does this call
+awgraph stats                            # what is in the index, incl. embedding coverage
+awgraph selftest                         # prove the install works</pre>
+  <p>
+    <code>query</code> prints <code>path:line [type] name</code> plus the
+    signature, so a result pastes straight into an editor; <code>--json</code>
+    on any read command gives machine-readable output. Exit codes distinguish
+    <strong>0</strong> success, <strong>1</strong> a real negative answer, and
+    <strong>2</strong> could not run &mdash; so a caller can tell &ldquo;nothing
+    matched&rdquo; from &ldquo;there is no index yet&rdquo;. The index is cached
+    <em>outside</em> your repository, keyed by a digest of its absolute path.
+  </p>
+
+  <h2>Use it from Python</h2>
   <pre>import asyncio
 from awgraph import CodeGraph
 

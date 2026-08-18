@@ -14,7 +14,7 @@ for the wheel and quietly do not apply to it.
 Rules:
   * **MOAT001** no monorepo import (`lib.`, `services.`, `from AitherOS`). awgraph
     is standalone by contract; one of these is a `ModuleNotFoundError` on a
-    stranger's machine, and the plugin seam (`awgraph plugin hooks`) exists precisely so
+    stranger's machine, and the guarded-import seam exists precisely so
     the fleet integrations attach from OUTSIDE the published package.
   * **MOAT002** no internal identifier - debt-row ids, checker rule ids, absolute
     monorepo paths. No secret scanner fires on these because none is a
@@ -41,6 +41,7 @@ import tarfile
 import zipfile
 from pathlib import Path
 from typing import Callable, List, Tuple
+
 
 def _classify_monorepo_imports(blob: bytes) -> tuple:
     """(guarded, unguarded) counts for monorepo imports in a source blob.
@@ -288,9 +289,9 @@ def self_test() -> int:
           any(f.startswith("MOAT003") for f in
               inspect(wheel({"awgraph/cli.py": "x=1\n"}))), True)
 
-    # `awgraph plugin hooks` is the seam; importing it is not a monorepo import.
+    # awgraph.base is internal to the package; importing it is not a monorepo import.
     check("does NOT flag the package's own imports",
-          inspect(wheel({**clean, "awgraph/y.py": "from awgraph plugin hooks import call\n"})) == [],
+          inspect(wheel({**clean, "awgraph/y.py": "from awgraph.base import Base\n"})) == [],
           True)
 
     with tempfile.TemporaryDirectory() as td:

@@ -5,6 +5,32 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-08-18
+
+### Added
+
+- **A command line interface.** `pip install awgraph` now puts an `awgraph`
+  command on PATH: `index`, `query`, `callers`, `calls`, `stats`, `selftest`.
+  Until now the only way to use the package was to write async Python, which is
+  a higher bar than the tool deserves.
+- `awgraph selftest` indexes a throwaway package, retrieves from it, and asserts
+  a **control query** (about something absent from the corpus) does not match as
+  widely as the real one. Without that control the test passes on a retriever
+  that returns everything, which is the failure mode a naive smoke test cannot
+  see.
+- `--json` on every read command, and meaningful exit codes: 0 success, 1 a real
+  negative answer, 2 could not run. A caller can distinguish "nothing matched"
+  from "there is no index".
+- `awgraph stats` reports embedding coverage unconditionally, including 0%.
+
+### Fixed
+
+- **The index cache no longer writes into the repository being indexed.** It
+  previously fell back to `<repo>/Library/Data/codegraph`, which pollutes a
+  stranger's checkout and simply fails on a read-only or CI tree. Caches now go
+  to `AWGRAPH_CACHE_DIR`, else the platform user-cache directory, keyed by a
+  digest of the absolute repo path so two checkouts never share an index.
+
 ## [1.0.0] — 2026-08-18
 
 ### Added

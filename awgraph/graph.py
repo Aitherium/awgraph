@@ -4312,13 +4312,42 @@ def get_codegraph(
         return cg
 
 
+def _cache_root() -> str:
+    """Where awgraph keeps its index caches.
+
+    Order: AWGRAPH_CACHE_DIR, then the platform user-cache dir. NEVER inside the
+    repository being indexed — a public tool that writes a ``Library/`` tree into
+    a stranger's checkout looks like it corrupted their project, and on a
+    read-only or CI checkout the write fails outright.
+    """
+    env = os.environ.get("AWGRAPH_CACHE_DIR")
+    if env:
+        return env
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+            os.path.expanduser("~"), ".cache"
+        )
+    return os.path.join(base, "awgraph")
+
+
 def _get_data_path(root_path: str, filename: str) -> str:
-    """Get path in the Library/Data/codegraph dir, using Paths module for Docker awareness."""
+    """Per-repository cache file path.
+
+    Keyed by a digest of the ABSOLUTE root path so two checkouts of the same
+    project, or two projects sharing a basename, never share an index. The
+    basename is kept in the directory name purely so a human can read the cache
+    dir; the digest is what makes it unique.
+    """
     try:
-        from paths import Paths
-        data_dir = str(Paths.DATA / "codegraph")
-    except Exception:
-        data_dir = os.path.join(root_path, "Library", "Data", "codegraph")
+        abs_root = os.path.abspath(root_path)
+    except (OSError, ValueError):
+        abs_root = str(root_path)
+    digest = hashlib.sha256(abs_root.encode("utf-8", "replace")).hexdigest()[:12]
+    label = os.path.basename(abs_root.rstrip("/\\")) or "repo"
+    label = re.sub(r"[^A-Za-z0-9._-]", "_", label)[:40]
+    data_dir = os.path.join(_cache_root(), f"{label}-{digest}")
     os.makedirs(data_dir, exist_ok=True)
     return os.path.join(data_dir, filename)
 

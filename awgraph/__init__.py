@@ -57,7 +57,7 @@ from awgraph.registry import CodeGraphRegistry, get_codegraph_registry
 from awgraph.store import CodeGraphStore
 from awgraph.base import BaseFacultyGraph, GraphSyncConfig
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "CodeGraph",
