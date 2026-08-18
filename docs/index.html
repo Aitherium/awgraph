@@ -137,6 +137,29 @@
     <code>codegraph_task_context_ab.py --embed --sweep 10,25,50,100,200,400</code>.
   </p>
 
+  <h2>Do you need the embeddings?</h2>
+  <p>
+    Ablated on the same 33 tasks and the same index, with the semantic half
+    switched off:
+  </p>
+  <table>
+    <thead><tr><th>k</th><th class="num">keyword only</th>
+      <th class="num">with embeddings</th><th class="num">gain</th></tr></thead>
+    <tbody>
+      <tr><td>10</td><td class="num">0.682</td><td class="num">0.803</td>
+          <td class="num win">+0.121</td></tr>
+      <tr><td>25</td><td class="num">0.818</td><td class="num">0.939</td>
+          <td class="num win">+0.121</td></tr>
+      <tr><td>50</td><td class="num">0.909</td><td class="num">0.939</td>
+          <td class="num">+0.030</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Yes at small <code>k</code>, and less so as the budget grows &mdash; which is
+    the regime that matters, since the whole point is a small <code>k</code>.
+    Embedding on CPU is the slow part of setup; this is what it buys.
+  </p>
+
   <h2>The method</h2>
   <p>
     The task is a real commit message with the answer filenames stripped out of

@@ -48,6 +48,10 @@
       "value": 43730,
       "unit": "chunks in 75.5s",
       "as_of": "2026-08-18T11:40:00Z"
+    },
+    "recall gain from embeddings at k=25": {
+      "value": 0.121,
+      "as_of": "2026-08-18T12:15:00Z"
     }
   },
   "links": {
@@ -61,7 +65,8 @@
     "awgraph's token counts are previews (signature + docstring + body excerpt); an agent reading its top hits in full pays more. grep's figure is whole files.",
     "REFUTED: embedding coverage was not the gap - 33.3% -> 100% coverage moved recall@10 only 0.800 -> 0.803.",
     "DID NOT WORK: naive graph-then-grep fusion scored 0.894 at 348,389 tokens, because a fallback keyed on result COUNT fires when the graph is confidently wrong and stays quiet when it is confidently right.",
-    "n=33, one repository, Python only."
+    "n=33, one repository, Python only.",
+    "Ablation on the same 33 tasks: keyword-only scores 0.682/0.818/0.909 at k=10/25/50 versus 0.803/0.939/0.939 with embeddings, so the semantic half contributes +0.121 recall at the small k that matters."
   ],
   "version": "1.1.0",
   "generated_at": "2026-08-18T11:40:00Z"

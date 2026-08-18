@@ -48,6 +48,19 @@ Read it honestly, because the shape matters:
   whole files, which is what an agent actually has to read. The comparison is
   fair at the *retrieval* step and generous to awgraph after it.
 
+**Do you actually need the embeddings?** Ablated on the same 33 tasks, same
+index, semantic half off:
+
+| k | keyword only | with embeddings | gain |
+|---|---|---|---|
+| 10 | 0.682 | 0.803 | +0.121 |
+| 25 | 0.818 | 0.939 | +0.121 |
+| 50 | 0.909 | 0.939 | +0.030 |
+
+So yes at small `k`, and less so as the budget grows — which is the regime that
+matters, since the whole point is a small `k`. Embedding on CPU is the slow part
+of setup, and this is what it buys.
+
 Caveats, because a benchmark without them is marketing: n=33, one repository,
 Python only, and `k` is a knob a caller chooses rather than something the tool
 tunes for itself.
