@@ -1,0 +1,56 @@
+{
+  "schemaVersion": "1",
+  "name": "awgraph",
+  "description": "A code knowledge graph for agents: symbols, call paths and dependencies, served as the few chunks a task needs instead of a grep dump.",
+  "url": "https://aitherium.github.io/awgraph/",
+  "repository": "https://github.com/Aitherium/awgraph",
+  "kind": "tool",
+  "language": "Python",
+  "license": "Apache-2.0",
+  "install": {
+    "pip": "pip install awgraph"
+  },
+  "tags": [
+    "code-graph",
+    "retrieval",
+    "agents",
+    "context-engineering",
+    "static-analysis"
+  ],
+  "metrics": {
+    "context reduction vs grep": {
+      "value": 234,
+      "unit": "x",
+      "as_of": "2026-08-18T00:41:50Z"
+    },
+    "recall@10": {
+      "value": 0.8,
+      "as_of": "2026-08-18T00:41:50Z"
+    },
+    "context tokens per task": {
+      "value": 1503,
+      "as_of": "2026-08-18T00:41:50Z"
+    },
+    "grep baseline tokens per task": {
+      "value": 351369,
+      "as_of": "2026-08-18T00:41:50Z"
+    },
+    "index throughput": {
+      "value": 43730,
+      "unit": "chunks in 75.5s",
+      "as_of": "2026-08-18T00:41:50Z"
+    }
+  },
+  "links": {
+    "docs": "https://aitherium.github.io/awgraph/",
+    "ecosystem": "https://github.com/Aitherium/awgraph/blob/main/docs/ECOSYSTEM.md"
+  },
+  "notes": [
+    "Metrics are retrieval measurements over 15 real commits with k=10, where the task is a commit message with answer filenames stripped and the truth is the files that commit modified.",
+    "grep scored HIGHER recall (0.933 vs 0.800). The claim here is cost, not superiority: 86% of grep's recall for 0.43% of its context.",
+    "Embedding coverage on that run was 33.3%, so the recall figure understates the semantic half.",
+    "A naive graph-then-grep fusion was measured at 0.933 recall / 352,872 tokens - more expensive than grep alone, because the fallback fires on nearly every task. Recorded because it did not work."
+  ],
+  "version": "1.0.0",
+  "generated_at": "2026-08-18T00:41:50Z"
+}
