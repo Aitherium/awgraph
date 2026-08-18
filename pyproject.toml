@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "awgraph"
+version = "1.0.0"
+description = "Semantic Python code graph — AST indexing, call graphs, and hybrid search for Python codebases."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "httpx>=0.25.0",
+]
+
+# Optional dependencies
+[project.optional-dependencies]
+# numpy is highly recommended for efficient vector storage (array('f') fallback otherwise)
+numpy = ["numpy>=1.21.0"]
+
+# Development and testing
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21.0"]
+
+[project.urls]
+Homepage = "https://github.com/Aitherium/awgraph"
+Documentation = "https://github.com/Aitherium/awgraph#readme"
+Repository = "https://github.com/Aitherium/awgraph.git"
+Issues = "https://github.com/Aitherium/awgraph/issues"
+
+[tool.setuptools]
+packages = ["awgraph"]
+license-files = ["LICENSE"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501", "E402", "E741"]  # line length, module-level imports, ambiguous names
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
