@@ -116,10 +116,40 @@ def test_stats_reports_embedding_coverage(repo):
 
 
 def test_index_of_a_tree_with_no_python_says_so(tmp_path, monkeypatch):
+    """An empty result must name the REASON, and the reason is not always the same.
+
+    This used to assert "0 chunks ... Python only" for a tree holding a
+    README.md, which encoded the Python-only limitation as expected behaviour.
+    With the multilang extra a markdown file IS indexed, so the old assertion
+    would now be pinning a message that lies to anyone with a TypeScript repo.
+
+    Both branches still have to be honest, so both are asserted here.
+    """
+    from awgraph import multilang
+
     monkeypatch.setenv("AWGRAPH_CACHE_DIR", str(tmp_path / ".cache"))
     (tmp_path / "README.md").write_text("no python here", encoding="utf-8")
     out = _call("code_index", path=str(tmp_path))
-    assert "0 chunks" in out and "Python only" in out, out[:300]
+
+    if multilang.available()[0]:
+        # Documents are content, not noise — the whole point of the extra.
+        assert "0 chunks" not in out, out[:300]
+        assert "Indexed" in out, out[:300]
+    else:
+        assert "0 chunks" in out, out[:300]
+        assert "multilang" in out, out[:300]
+
+
+def test_empty_tree_reports_nothing_indexable(tmp_path, monkeypatch):
+    """A genuinely empty tree must still report zero, whatever is installed.
+
+    The guard the original test was really providing: "indexed 0" must remain
+    reachable and must not be smoothed over into a success message.
+    """
+    monkeypatch.setenv("AWGRAPH_CACHE_DIR", str(tmp_path / ".cache"))
+    (tmp_path / "notes.bin").write_bytes(b"\x00\x01\x02")
+    out = _call("code_index", path=str(tmp_path))
+    assert "0 chunks" in out, out[:300]
 
 
 def test_missing_mcp_package_message_names_the_fix():

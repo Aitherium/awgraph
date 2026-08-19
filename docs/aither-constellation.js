@@ -23,12 +23,14 @@
 
   var HOST = "https://aitherium.github.io/";
   var REPOS = [
-    { id: "awgit",         label: "awgit",         blurb: "semantic VCS — code nodes, not lines" },
+    { id: "awgit",         label: "awgit",         blurb: "semantic version control — what changed, who is editing it" },
+    { id: "awgraph",       label: "awgraph",       blurb: "code intelligence — what the code is, what depends on what" },
     { id: "AitherZero",    label: "AitherZero",    blurb: "infrastructure automation" },
-    { id: "aither-adk",    label: "aither-adk",    blurb: "agent development kit" },
+    { id: "awdk",    label: "awdk",    blurb: "the agent runtime that consumes all three" },
     { id: "aitherkvcache", label: "aitherkvcache", blurb: "KV cache + weight mirror" },
-    { id: "aither-skills", label: "aither-skills", blurb: "portable agent skills" },
-    { id: "awgraph",       label: "awgraph",       blurb: "code graph — the context an agent reads instead of grepping" }
+    { id: "awskills", label: "awskills", blurb: "portable agent skills" },
+    { id: "awrelay",       label: "awrelay",       blurb: "agent messaging — who found what, who needs to hear it" },
+    { id: "awm",           label: "awm",           blurb: "small, dependency-light world model (LeWM)" }
   ];
 
   var CSS = [

@@ -231,8 +231,16 @@ asyncio.run(main())</pre>
     Three packages, three different questions about the same repository:
     <a href="https://github.com/Aitherium/awgit">awgit</a> knows what changed and
     who is editing it; awgraph knows what the code is and what depends on what;
-    <a href="https://github.com/Aitherium/aither-adk">aither-adk</a> is the agent
-    runtime that consumes both.
+    <a href="https://github.com/Aitherium/awrelay">awrelay</a> knows who found what
+    and who still needs to hear it.
+    <a href="https://github.com/Aitherium/awdk">awdk</a> is the agent
+    runtime that consumes all three.
+  </p>
+  <p>
+    <strong>None of the three requires the others.</strong> Used together, an agent
+    can find a symptom with awgraph, check whether it is an in-flight edit with
+    awgit, and tell the agent already working that file with awrelay — three
+    questions a solo grep-and-guess loop cannot ask at all.
   </p>
   <div id="aither-constellation" data-self="awgraph"></div>
   <script src="aither-constellation.js"></script>

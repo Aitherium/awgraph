@@ -5,6 +5,60 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-08-19
+
+### Added
+
+- **Multi-language and document indexing** via the new `multilang` extra
+  (`pip install awgraph[multilang]`). awgraph was Python-only: it parsed with
+  CPython's `ast` and discovered files with `rglob("*.py")`, so every `.ts`,
+  `.go`, `.rs`, `.cs` file — and every `.md` — was absent from the index. On a
+  mixed repository that is most of the repository, and the failure was SILENT:
+  the index built, queries returned, and the answers came from whatever fraction
+  of the tree happened to be Python.
+
+  Symbol-bearing languages are chunked by SYMBOL through
+  [repowise](https://pypi.org/project/repowise/) (75 extensions, 42 languages),
+  whose ids survive a symbol MOVING — which is why the id, not a body hash, is
+  what a chunk's identity is derived from. Symbol-less files (markdown,
+  asciidoc, json, yaml, toml, ini, csv, html, css, xml, sql) are chunked by
+  SECTION: prose by heading, everything else by an overlapping line window.
+
+  Verified end to end rather than asserted — indexing a mixed tree and querying
+  it returns `Rollback timeout@RUNBOOK.md`, `validateToken@auth.ts` and
+  `StartServer@server.go`.
+
+  The extra is optional and absence is not an error: parsing falls back to
+  Python and records `multi-language indexing unavailable` in `parse_errors`,
+  so "why is my .ts file missing" has an answer instead of an empty graph.
+
+- **`discover_files(root, extensions=..., exclude_dirs=...)`** — the discovery
+  policy is now a parameter. `extensions` defaults to exactly what the parser
+  can handle, so discovery and parsing cannot drift into indexing files nothing
+  can read. `exclude_dirs=[]` relies on `.gitignore` alone.
+
+### Fixed
+
+- **`.gitignore` was never honoured.** An *include* glob switches ripgrep's
+  ignore-file handling OFF, and discovery passed `-g "*.py"` — so every ignored
+  build artifact and vendored tree was indexed as source, invisibly, because
+  those files genuinely exist. Extensions are now filtered in Python and only
+  NEGATED globs are passed.
+
+- **The exclude list excluded nothing** whenever the indexer ran from a
+  directory other than the tree being indexed — the normal case for a library.
+  ripgrep anchors a glob at the CURRENT WORKING DIRECTORY, not the search root,
+  so `!node_modules/**` matched nothing. Now anchored with `**/`.
+
+- **Symbol names carried the indexing machine's directory layout.** repowise
+  derives `qualified_name` from the file path, so an absolute path produced
+  `C.Users.me.tmp.probe.alpha` instead of `probe.alpha` — unfindable by its own
+  name, and a local-path leak into an index that may be shared.
+
+- `code_index` reported "awgraph parses Python only" for every empty result. It
+  now distinguishes an empty tree from a missing `multilang` extra, which are
+  different problems that previously read identically.
+
 ## [1.2.1] - 2026-08-18
 
 ### Fixed

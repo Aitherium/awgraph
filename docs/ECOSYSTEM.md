@@ -43,7 +43,7 @@ awgraph indexes:
 - Which of those 47 will need updates
 - Whether your change is backward-compatible (if the signature doesn't change, no impact)
 
-### aither-adk — Agent Runtime
+### awdk — Agent Runtime
 
 **Purpose:** *Use* awgit and awgraph together to make decisions.
 
@@ -203,7 +203,7 @@ class CodeUnderstandingAgent(Agent):
 
 ## Wiring it into an agent (verified, not aspirational)
 
-`aither-adk` already carries the integration point — `agent.set_code_graph(cg)`
+`awdk` already carries the integration point — `agent.set_code_graph(cg)`
 registers `code_search` and `code_context` as agent tools. awgraph satisfies the
 interface it expects (`query`, `get_context_for_chunk`, `get_full_body`) with no
 adapter, so this is the whole wiring:

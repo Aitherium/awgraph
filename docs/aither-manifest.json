@@ -68,7 +68,7 @@
     "DID NOT WORK: naive graph-then-grep fusion scored 0.894 at 348,389 tokens, because a fallback keyed on result COUNT fires when the graph is confidently wrong and stays quiet when it is confidently right.",
     "n=33, one repository, Python only.",
     "Ablation on the same 33 tasks: keyword-only scores 0.682/0.818/0.909 at k=10/25/50 versus 0.803/0.939/0.939 with embeddings, so the semantic half contributes +0.121 recall at the small k that matters.",
-    "Three packages, three questions about one repository: awgit knows what changed and who is editing it, awgraph knows what the code IS and what depends on what, aither-adk is the agent runtime that consumes both. aither-adk takes awgraph as a real dependency rather than forking it."
+    "Three packages, three questions about one repository: awgit knows what changed and who is editing it, awgraph knows what the code IS and what depends on what, awdk is the agent runtime that consumes both. awdk takes awgraph as a real dependency rather than forking it."
   ],
   "version": "1.2.1",
   "generated_at": "2026-08-18T23:40:00Z"

@@ -40,16 +40,14 @@ import ast
 import asyncio
 import hashlib
 import json
-from array import array
-from awgraph.logging import get_logger
 import math
 import os
 import pickle
 import re
-import subprocess
 import threading
 import time
-from collections import defaultdict, OrderedDict
+from array import array
+from collections import OrderedDict, defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
@@ -58,8 +56,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from awgraph.base import BaseFacultyGraph, GraphSyncConfig
 from awgraph import plugins as _plugins
+from awgraph.base import BaseFacultyGraph, GraphSyncConfig
 from awgraph.degradation import SubsystemTier
 
 # Host-overridable via awgraph.plugins.configure(). Read ONCE at import, so a
@@ -251,7 +249,6 @@ async def _llm_generate(prompt: str, model: str = ELASTIC_REFLEX,
     vllm = _detect_vllm()
     if vllm:
         try:
-            import httpx
             async with AsyncClient(timeout=30.0) as client:
                 r = await client.post(
                     f"{vllm}/v1/chat/completions",
@@ -356,8 +353,8 @@ def _pickle_hmac_key() -> bytes:
 
 def _compute_file_hmac(filepath: str) -> str:
     """Compute HMAC-SHA256 of a file's contents."""
-    import hmac as _hmac_mod
     import hashlib as _hashlib_mod
+    import hmac as _hmac_mod
     with open(filepath, "rb") as f:
         data = f.read()
     return _hmac_mod.new(_pickle_hmac_key(), data, _hashlib_mod.sha256).hexdigest()
@@ -404,13 +401,20 @@ class ChunkType(str, Enum):
     CLASS = "class"
     FUNCTION = "function"
     METHOD = "method"
+    # Non-Python. SYMBOL is anything repowise extracts from the other 40+
+    # languages (its `kind` is kept verbatim on the chunk's signature rather
+    # than being forced into CLASS/FUNCTION, because "trait", "interface" and
+    # "impl" have no honest Python equivalent). SECTION is a slice of a
+    # symbol-less file — a markdown heading, or a window of a yaml/json file.
+    SYMBOL = "symbol"
+    SECTION = "section"
 
 
 @dataclass
 class CodeChunk:
     """
     A semantic chunk of Python code with full relationship data.
-    
+
     This is NOT just "text found at line X" - it's a node in the
     code graph with edges to what it calls and what calls it.
     """
@@ -418,31 +422,31 @@ class CodeChunk:
     name: str
     chunk_type: ChunkType
     source_path: str
-    
+
     # Location
     start_line: int
     end_line: int
-    
+
     # Semantic content
     signature: str = ""  # Full signature: "async def foo(x: int) -> str"
     docstring: str = ""
     body_preview: str = ""  # First N chars of body
-    
+
     # Imports used by this chunk
     imports: List[str] = field(default_factory=list)
     import_map: Dict[str, str] = field(default_factory=dict)  # local_name -> full_module.name
-    
+
     # CALL GRAPH - the key insight
     calls: List[str] = field(default_factory=list)  # What functions/methods this code calls
     called_by: List[str] = field(default_factory=list)  # What calls this (backfilled)
-    
+
     # For classes
     base_classes: List[str] = field(default_factory=list)
     methods: List[str] = field(default_factory=list)
-    
+
     # For methods
     parent_class: Optional[str] = None
-    
+
     # Quality metrics
     complexity: int = 0  # Cyclomatic complexity estimate
     line_count: int = 0
@@ -574,10 +578,10 @@ class FileGraph:
 
 class CallExtractor(ast.NodeVisitor):
     """Extracts all function/method calls from an AST node."""
-    
+
     def __init__(self):
         self.calls: List[str] = []
-    
+
     def visit_Call(self, node: ast.Call):
         """Extract the name of what's being called or passed as reference."""
         if isinstance(node.func, ast.Name):
@@ -600,7 +604,7 @@ class CallExtractor(ast.NodeVisitor):
                     self.calls.append(f"{arg.value.id}.{arg.attr}")
                 else:
                     self.calls.append(arg.attr)
-        
+
         # Continue visiting children
         self.generic_visit(node)
 
@@ -658,7 +662,7 @@ def extract_calls(node: ast.AST) -> List[str]:
 def get_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     """Build full function signature from AST node."""
     args = []
-    
+
     # Regular args
     for arg in node.args.args:
         arg_str = arg.arg
@@ -668,7 +672,7 @@ def get_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
             except Exception as e:
                 logger.debug(f"[CallExtractor.get_signature] Operation failed: {e}")
         args.append(arg_str)
-    
+
     # Return type
     returns = ""
     if node.returns:
@@ -676,7 +680,7 @@ def get_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
             returns = f" -> {ast.unparse(node.returns)}"
         except Exception as e:
             logger.debug(f"[CallExtractor.get_signature] Operation failed: {e}")
-    
+
     prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
     return f"{prefix} {node.name}({', '.join(args)}){returns}"
 
@@ -696,6 +700,60 @@ def estimate_complexity(node: ast.AST) -> int:
 # PARSER - Single file parsing
 # ============================================================================
 
+def _parse_non_python(file_path: str, content: str, lines: List[str],
+                      graph: "FileGraph") -> None:
+    """Fill `graph` from a non-Python file: repowise symbols, or doc sections.
+
+    Kept deliberately narrow. It does NOT try to build call edges: repowise
+    gives symbol spans, not a resolved call graph, and inventing edges from
+    name collisions across 40 languages would produce confident wrong
+    relationships — worse than none, because the retrieval layer trusts them.
+    Non-Python chunks are therefore retrievable (keyword + semantic) but carry
+    no `calls`/`called_by`, which is honest about what was actually parsed.
+    """
+    from awgraph import multilang  # noqa: PLC0415 - optional dependency
+
+    ok, why = multilang.available()
+    if not ok:
+        # Not an error: repowise is an optional extra. Recorded so a caller
+        # asking "why is my .ts file missing" gets an answer instead of an
+        # empty graph that looks like an empty file.
+        graph.parse_errors.append(f"multi-language indexing unavailable ({why})")
+        return
+
+    if multilang.is_document(file_path):
+        entries = multilang.chunk_document(content, file_path)
+    else:
+        entries = multilang.parse_symbols(content.encode("utf-8", "ignore"), file_path)
+
+    if not entries:
+        return
+
+    is_doc = multilang.is_document(file_path)
+    for entry in entries:
+        start_line = max(1, int(entry.get("start_line") or 1))
+        end_line = max(start_line, int(entry.get("end_line") or start_line))
+        body = "\n".join(lines[start_line - 1:end_line])
+        name = str(entry.get("name") or "")
+        kind = str(entry.get("kind") or ("section" if is_doc else "symbol"))
+        lang = str(entry.get("language") or "")
+        # Hash the repowise symbol id, not the body: the id survives a move, so
+        # a chunk keeps its identity when code above it shifts.
+        ident = str(entry.get("symbol_id") or f"{file_path}::{name}")
+        graph.chunks.append(CodeChunk(
+            id=f"{kind}_{hashlib.sha256(ident.encode()).hexdigest()[:12]}",
+            name=name,
+            chunk_type=ChunkType.SECTION if is_doc else ChunkType.SYMBOL,
+            source_path=file_path,
+            start_line=start_line,
+            end_line=end_line,
+            signature=f"{lang} {kind} {name}".strip(),
+            docstring="",
+            body_preview=body,
+            line_count=end_line - start_line + 1,
+        ))
+
+
 def parse_file_sync(file_path: str, content: Optional[str] = None) -> FileGraph:
     """
     Parse a single Python file into a FileGraph.
@@ -714,17 +772,28 @@ def parse_file_sync(file_path: str, content: Optional[str] = None) -> FileGraph:
             content = Path(file_path).read_text(encoding="utf-8", errors="ignore")
         lines = content.split("\n")
         graph.imports = []
-        
+
+        # Non-Python files route to the repowise adapter (symbols) or to
+        # section chunking (documents). Before this existed the function ran
+        # ast.parse() on every file it was given, so a .ts or .md file produced
+        # a SyntaxError, landed in parse_errors, and returned an EMPTY graph —
+        # indistinguishable from a file with nothing in it. That is why the
+        # index silently covered only the Python share of a mixed repository.
+        if not file_path.endswith(".py"):
+            _parse_non_python(file_path, content, lines, graph)
+            graph.processing_ms = (time.perf_counter() - start) * 1000
+            return graph
+
         try:
             tree = ast.parse(content)
         except SyntaxError as e:
             graph.parse_errors.append(str(e))
             graph.processing_ms = (time.perf_counter() - start) * 1000
             return graph
-        
+
         # Module-level docstring
         graph.module_docstring = ast.get_docstring(tree) or ""
-        
+
         # Extract imports first
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -736,7 +805,7 @@ def parse_file_sync(file_path: str, content: Optional[str] = None) -> FileGraph:
                     graph.imports.append(node.module)
                     for alias in node.names:
                         graph.import_map[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-        
+
         # Module-level chunk: docstring + top-level constants.
         #
         # Without this, ONLY functions/classes/methods are indexed, so facts that
@@ -753,23 +822,23 @@ def parse_file_sync(file_path: str, content: Optional[str] = None) -> FileGraph:
 
         # First pass: extract all functions and classes
         class_methods: Dict[str, List[str]] = defaultdict(list)  # class_name -> [method_names]
-        
+
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.ClassDef):
                 chunk = _extract_class(node, lines, file_path, graph.imports, graph.import_map)
                 graph.chunks.append(chunk)
-                
+
                 # Extract methods
                 for item in node.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         method_chunk = _extract_method(item, lines, file_path, node.name, graph.imports, graph.import_map)
                         graph.chunks.append(method_chunk)
                         class_methods[node.name].append(item.name)
-                
+
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 chunk = _extract_function(node, lines, file_path, graph.imports, graph.import_map)
                 graph.chunks.append(chunk)
-        
+
         # Update class chunks with their methods
         for chunk in graph.chunks:
             if chunk.chunk_type == ChunkType.CLASS:
@@ -874,7 +943,7 @@ def _extract_class(node: ast.ClassDef, lines: List[str], source_path: str, impor
     """Extract a class definition."""
     start_line = node.lineno
     end_line = node.end_lineno or start_line
-    
+
     # Get base classes
     bases = []
     for base in node.bases:
@@ -882,18 +951,18 @@ def _extract_class(node: ast.ClassDef, lines: List[str], source_path: str, impor
             bases.append(base.id)
         elif isinstance(base, ast.Attribute):
             bases.append(base.attr)
-    
+
     # Get docstring
     docstring = ast.get_docstring(node) or ""
-    
+
     # Build signature
     signature = f"class {node.name}"
     if bases:
         signature += f"({', '.join(bases)})"
-    
+
     # Extract calls from class body (decorators, default values, etc.)
     calls = extract_calls(node)
-    
+
     return CodeChunk(
         id=f"class_{node.name}_{hashlib.sha256(source_path.encode()).hexdigest()[:8]}",
         name=node.name,
@@ -917,11 +986,11 @@ def _extract_function(node: ast.FunctionDef | ast.AsyncFunctionDef, lines: List[
     """Extract a function definition."""
     start_line = node.lineno
     end_line = node.end_lineno or start_line
-    
+
     docstring = ast.get_docstring(node) or ""
     signature = get_signature(node)
     calls = extract_calls(node)
-    
+
     return CodeChunk(
         id=f"func_{node.name}_{hashlib.sha256(source_path.encode()).hexdigest()[:8]}",
         name=node.name,
@@ -944,11 +1013,11 @@ def _extract_method(node: ast.FunctionDef | ast.AsyncFunctionDef, lines: List[st
     """Extract a method definition."""
     start_line = node.lineno
     end_line = node.end_lineno or start_line
-    
+
     docstring = ast.get_docstring(node) or ""
     signature = get_signature(node)
     calls = extract_calls(node)
-    
+
     return CodeChunk(
         id=f"method_{class_name}_{node.name}_{hashlib.sha256(source_path.encode()).hexdigest()[:8]}",
         name=f"{class_name}.{node.name}",
@@ -1025,48 +1094,114 @@ def _drop_mirrored_duplicates(files: List[Path], root: Path) -> List[Path]:
         return files
 
 
+def _fd_ext_args(exts):
+    """`fd` extension flags. fd filters by extension natively and keeps its
+    own `.gitignore` handling, so `-e` is safe here in a way `rg -g` is not."""
+    args = []
+    for ext in sorted(exts):
+        args += ["-e", ext.lstrip(".")]
+    return args
+
+
+#: Directories skipped in ADDITION to the generic set in
+#: `multilang.DEFAULT_EXCLUDE_DIRS`. These are one tree's layout, not universal
+#: truth, which is why they are a named default a caller can replace rather
+#: than a literal buried in an argv list — a published package that hardcodes
+#: another project's folder names silently skips directories a stranger may
+#: legitimately have, and gives them no way to say so.
+#:
+#: `Library` earns its entry by measurement: vendored repos under it are NOT
+#: this codebase, and indexing them quintupled the index and poisoned locate()'s
+#: suffix matching with duplicate paths. `dist/` alone was ~2,291 packaged .py
+#: files (~30% of discovery) before it was excluded — it now lives in the
+#: generic list, since no project wants its build output indexed.
+EXTRA_EXCLUDE_DIRS = (
+    "Worktrees", "runtime", "training-data", "test_artifacts", "_archive",
+    "external", "Library", "dormant_llm_puzzle*", "DormantPuzzle*",
+    "PromptDrivenStrategy*",
+)
+
+
+def _fd_exclude_args(excludes):
+    """`fd` exclude flags."""
+    args = []
+    for d in excludes:
+        args += ["--exclude", d]
+    return args
+
+
+def _rg_exclude_args(excludes):
+    """`rg` NEGATED globs, anchored with `**/`.
+
+    Two separate traps live in this one line, and the original code hit both.
+
+    1. Negation is required: an INCLUDE glob switches ripgrep's `.gitignore`
+       handling off entirely. Negated globs do not.
+    2. `**/` is required: ripgrep anchors a glob at the CURRENT WORKING
+       DIRECTORY, not at the search root. Measured from a different cwd:
+
+           rg --files --glob '!skipme/**'    <root>  -> a.py, b.py   (no effect)
+           rg --files --glob '!**/skipme/**' <root>  -> a.py         (excluded)
+
+       So the previous `!node_modules/**` form excluded nothing whenever the
+       indexer ran from anywhere other than the tree being indexed — which is
+       the normal case for a library. The exclude list LOOKED enforced and was
+       inert, which is why `dist/` could contribute ~2,291 files to discovery
+       while sitting in the exclude list the whole time.
+    """
+    args = []
+    for d in excludes:
+        args += ["--glob", f"!**/{d}/**"]
+    return args
+
+
+def default_exclude_dirs():
+    """The exclude list used when a caller names none."""
+    from awgraph import multilang  # noqa: PLC0415
+
+    return list(multilang.DEFAULT_EXCLUDE_DIRS) + list(EXTRA_EXCLUDE_DIRS)
+
+
+async def discover_files(root: Path, extensions=None, exclude_dirs=None):
+    """Find indexable files under `root`.
+
+    `extensions` defaults to every extension the parser can actually handle —
+    Python alone without the `multilang` extra, 75 with it. Discovery and
+    parsing are kept in step deliberately: discovering a file nothing can parse
+    only adds empty chunks, and the two drifting apart is how an index comes to
+    hold entries no query can match.
+
+    `exclude_dirs` replaces the default skip list outright. Pass `[]` to rely on
+    `.gitignore` alone, which is the honest default for most repositories now
+    that ignore files are actually respected.
+    """
+    from awgraph import multilang  # noqa: PLC0415 - optional dependency
+
+    exts = multilang.index_extensions(only=extensions)
+    excludes = default_exclude_dirs() if exclude_dirs is None else list(exclude_dirs)
+    return await _discover(root, exts, excludes)
+
+
 async def discover_python_files(root: Path) -> Tuple[List[Path], float]:
+    """Back-compat alias for :func:`discover_files`.
+
+    Kept because existing call sites use this name; it now discovers whatever
+    the parser supports, not only Python.
+    """
+    return await discover_files(root)
+
+
+async def _discover(root: Path, exts, excludes) -> Tuple[List[Path], float]:
     """Use ripgrep/fd for fast file discovery."""
     start = time.perf_counter()
     files: List[Path] = []
-    
+
     # Try fd first (note: fd syntax is `fd <PATTERN> <PATH>`, use "." to match all)
     try:
         result = await asyncio.create_subprocess_exec(
             "fd", ".", str(root),
-            "-e", "py", "--type", "f",
-            "--exclude", ".git",
-            "--exclude", "node_modules",
-            "--exclude", "__pycache__",
-            "--exclude", ".venv",
-            "--exclude", "venv",
-            "--exclude", "Worktrees",
-            "--exclude", ".worktrees",
-            "--exclude", "site-packages",
-            "--exclude", "runtime",
-            "--exclude", "training-data",
-            "--exclude", "test_artifacts",
-            "--exclude", "_archive",
-            "--exclude", "external",
-            # Bind-mounted data tree: vendored repos under Library/repos are
-            # NOT this codebase (register them as separate registry roots) —
-            # indexing them quintupled the index and poisoned locate()'s
-            # suffix matching with duplicate paths.
-            "--exclude", "Library",
-            "--exclude", "dormant_llm_puzzle*",
-            "--exclude", "DormantPuzzle*",
-            "--exclude", "PromptDrivenStrategy*",
-            # Build/tooling artifacts — not source. `dist/` alone was ~2,291
-            # compiled/packaged .py files (≈30% of discovery), inflating the
-            # index with duplicates and driving needless reconcile work.
-            "--exclude", "dist",
-            "--exclude", "build",
-            "--exclude", ".next",
-            "--exclude", ".turbo",
-            "--exclude", ".pytest_cache",
-            "--exclude", ".mypy_cache",
-            "--exclude", ".ruff_cache",
-            "--exclude", ".tox",
+            *_fd_ext_args(exts), "--type", "f",
+            *_fd_exclude_args(excludes),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1079,56 +1214,44 @@ async def discover_python_files(root: Path) -> Tuple[List[Path], float]:
             return files, (time.perf_counter() - start) * 1000
     except FileNotFoundError as e:
         logger.debug(f"[CallExtractor.discover_python_files] Operation failed: {e}")
-    
+
     # Fallback to ripgrep
     try:
         result = await asyncio.create_subprocess_exec(
-            "rg", "--files", "-g", "*.py",
-            "--glob", "!.git/**",
-            "--glob", "!node_modules/**",
-            "--glob", "!__pycache__/**",
-            "--glob", "!.venv/**",
-            "--glob", "!venv/**",
-            "--glob", "!Worktrees/**",
-            "--glob", "!.worktrees/**",
-            "--glob", "!site-packages/**",
-            "--glob", "!runtime/**",
-            "--glob", "!training-data/**",
-            "--glob", "!test_artifacts/**",
-            "--glob", "!_archive/**",
-            "--glob", "!external/**",
-            "--glob", "!Library/**",
-            # Keep the rg fallback in sync with the fd backend so discovery is
-            # deterministic across backends (divergence caused reconcile churn).
-            "--glob", "!dist/**",
-            "--glob", "!build/**",
-            "--glob", "!.next/**",
-            "--glob", "!.turbo/**",
-            "--glob", "!.pytest_cache/**",
-            "--glob", "!.mypy_cache/**",
-            "--glob", "!.ruff_cache/**",
-            "--glob", "!.tox/**",
-            "--glob", "!dormant_llm_puzzle*/**",
-            "--glob", "!DormantPuzzle*/**",
-            "--glob", "!PromptDrivenStrategy*/**",
+            # NO `-g` include glob here, deliberately. An include glob turns
+            # ripgrep's .gitignore handling OFF. Measured:
+            #   rg --files .                       -> a.ts            (ignored respected)
+            #   rg --files -g '*.ts' .             -> a.ts, secret.ts (ignore DISCARDED)
+            #   rg --files -g '!node_modules/**' . -> a.ts            (ignore respected)
+            # This branch passed `-g "*.py"`, so it had NEVER honoured
+            # .gitignore: every ignored build artifact and vendored tree was
+            # indexed as source, and nothing said so because the files exist.
+            # Negated globs below are fine; extensions are filtered in Python.
+            "rg", "--files",
+            *_rg_exclude_args(excludes),
             str(root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await result.communicate()
-        
+
         if result.returncode == 0:
             for line in stdout.decode().strip().split("\n"):
                 if line:
                     p = Path(line)
+                    if p.suffix.lower() not in exts:
+                        continue
                     files.append(p if p.is_absolute() else root / p)
             return files, (time.perf_counter() - start) * 1000
     except FileNotFoundError as e:
         logger.debug(f"[CallExtractor.discover_python_files] Operation failed: {e}")
-    
+
     # Final fallback — rglob is sync I/O; offload to thread so we don't
     # block the event loop (especially dangerous on Docker bind mounts).
-    _RGLOB_EXCLUDE_PARTS = frozenset({
+    # noqa N806 x3: these are CONSTANTS that happen to live in a function
+    # scope. Lowercasing them would make a fixed safety limit read like
+    # mutable state, which is the opposite of what they are.
+    _RGLOB_EXCLUDE_PARTS = frozenset({  # noqa: N806
         ".git", "__pycache__", "node_modules", ".venv", "venv",
         ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
         "Worktrees", "worktrees", ".worktrees",
@@ -1138,13 +1261,19 @@ async def discover_python_files(root: Path) -> Tuple[List[Path], float]:
         "Canvas-Studio", "external", "AEON_PORTRAITS",
         "affect_gallery", "simulator-temp",
     })
-    _RGLOB_MAX_FILES = 2000  # Safety cap — prevents runaway crawl
-    _RGLOB_TIMEOUT_S = 30    # Max seconds for rglob before giving up
+    _RGLOB_MAX_FILES = 2000  # noqa: N806 - safety cap, prevents runaway crawl
+    _RGLOB_TIMEOUT_S = 30  # noqa: N806 - max seconds before giving up
 
     def _sync_rglob():
         found = []
         deadline = time.perf_counter() + _RGLOB_TIMEOUT_S
-        for f in root.rglob("*.py"):
+        # One walk filtered by suffix, NOT one rglob per extension: with 75
+        # extensions that would be 75 full tree walks, and the deadline below
+        # would cut discovery off partway through the alphabet — silently
+        # indexing the languages that sort early and dropping the rest.
+        for f in root.rglob("*"):
+            if f.suffix.lower() not in exts:
+                continue
             if time.perf_counter() > deadline:
                 logger.warning(
                     f"[CodeGraph] rglob timeout after {_RGLOB_TIMEOUT_S}s "
@@ -1242,7 +1371,7 @@ class CodeGraph(BaseFacultyGraph):
         self._body_cache: OrderedDict[str, str] = OrderedDict()
         self._root_path: Optional[str] = root_path
         self._cache_dir: Optional[str] = cache_dir
-    
+
     async def index_codebase(
         self,
         root_path: str,
@@ -1251,25 +1380,25 @@ class CodeGraph(BaseFacultyGraph):
     ) -> Dict[str, Any]:
         """
         Index a codebase with full call graph analysis.
-        
+
         Returns stats about the indexing operation.
         """
         root = Path(root_path)
         total_start = time.perf_counter()
-        
+
         # Phase 1: Discovery
         if on_progress:
             on_progress(0.0, "Discovering files...")
-        
+
         files, self.discovery_ms = await discover_python_files(root)
         files = _drop_mirrored_duplicates(files, root)
         self.total_files = len(files)
-        
+
         logger.info(f"Discovered {len(files)} files in {self.discovery_ms:.0f}ms")
-        
+
         if on_progress:
             on_progress(0.1, f"Found {len(files)} files")
-        
+
         # Phase 2: Parse in parallel
         if on_progress:
             on_progress(0.15, "Parsing files...")
@@ -1283,7 +1412,7 @@ class CodeGraph(BaseFacultyGraph):
 
         results: List[FileGraph] = []
         pool_type = "thread" if _in_docker else "process"
-        
+
         if pool_type == "process":
             try:
                 with ProcessPoolExecutor(max_workers=self.max_workers) as pool:
@@ -1311,7 +1440,7 @@ class CodeGraph(BaseFacultyGraph):
                 # BATCH_SIZE = self.max_workers * 2 keeps the pipeline full without flooding
                 batch_size = max(10, self.max_workers * 2)
                 total_files = len(files)
-                
+
                 for i in range(0, total_files, batch_size):
                     batch = files[i : i + batch_size]
                     tasks = [
@@ -1325,13 +1454,13 @@ class CodeGraph(BaseFacultyGraph):
                             results.append(result)
                         except Exception as e:
                             logger.warning(f"Failed to parse file in batch: {e}")
-                    
+
                     # Update progress
                     processed_count = min(i + batch_size, total_files)
                     if on_progress and processed_count % 50 == 0:
                         progress = 0.15 + 0.6 * processed_count / total_files
                         on_progress(progress, f"Parsed {processed_count}/{total_files} (thread)")
-                    
+
                     # Yield to event loop to prevent timeouts
                     await asyncio.sleep(0.05)
                 for i, coro in enumerate(asyncio.as_completed(tasks)):
@@ -1340,13 +1469,13 @@ class CodeGraph(BaseFacultyGraph):
                     if on_progress and (i + 1) % 50 == 0:
                         progress = 0.15 + 0.6 * (i + 1) / len(files)
                         on_progress(progress, f"Parsed {i+1}/{len(files)}")
-        
+
         self.parsing_ms = (time.perf_counter() - parse_start) * 1000
-        
+
         # Phase 3: Build index
         if on_progress:
             on_progress(0.75, "Building index...")
-        
+
         for graph in results:
             for chunk in graph.chunks:
                 chunk.tenant_id = tenant_id
@@ -1384,7 +1513,7 @@ class CodeGraph(BaseFacultyGraph):
         # Phase 4: Backfill called_by relationships
         if on_progress:
             on_progress(0.85, "Building call graph...")
-        
+
         backfill_start = time.perf_counter()
         self._backfill_called_by()
         # v2: re-key freshly-parsed v1 ids to rename-safe stable ids (no-op on v1)
@@ -1424,7 +1553,7 @@ class CodeGraph(BaseFacultyGraph):
             "backfill_ms": self.backfill_ms,
             "total_ms": total_ms,
         }
-        
+
         logger.info(f"Indexing complete: {stats}")
         return stats
 
@@ -1532,7 +1661,8 @@ class CodeGraph(BaseFacultyGraph):
         """
         try:
             from lib.faculties.LangExtractFaculty import (
-                LangExtractFaculty, LANGEXTRACT_AVAILABLE,
+                LANGEXTRACT_AVAILABLE,
+                LangExtractFaculty,
             )
         except ImportError:
             logger.warning("LangExtractFaculty not available — skipping enrichment")
@@ -1612,7 +1742,7 @@ class CodeGraph(BaseFacultyGraph):
     def _backfill_called_by(self):
         """
         Build the called_by relationships by inverting the calls graph.
-        
+
         This is the key step that enables "what calls this function?"
         """
         # Build a map of name -> chunk_ids
@@ -1623,7 +1753,7 @@ class CodeGraph(BaseFacultyGraph):
             if "." in chunk.name:
                 short_name = chunk.name.split(".")[-1]
                 name_map[short_name].append(chunk_id)
-        
+
         # For each chunk, add it to the called_by list of what it calls
         for caller_id, caller in self.chunks.items():
             for called_name in caller.calls:
@@ -1636,18 +1766,18 @@ class CodeGraph(BaseFacultyGraph):
                             expected_module = caller.import_map[base_name]
                     elif called_name in caller.import_map:
                         expected_module = caller.import_map[called_name]
-                
+
                 # Find chunks matching this name
                 potential_callees = name_map.get(called_name, [])
                 for callee_id in potential_callees:
                     callee = self.chunks[callee_id]
-                    
+
                     # Same file calls are always valid
                     if caller.source_path == callee.source_path:
                         if caller.name not in callee.called_by:
                             callee.called_by.append(caller.name)
                         continue
-                        
+
                     # If we expect a specific module origin, enforce it
                     if expected_module:
                         callee_mod = self._path_to_module_prefix(callee.source_path)
@@ -1920,7 +2050,7 @@ class CodeGraph(BaseFacultyGraph):
         import fnmatch
 
         # Names that are always entry points or framework hooks
-        _ENTRY_NAMES = frozenset({
+        _ENTRY_NAMES = frozenset({  # noqa: N806 - fixed lookup set, not mutable state
             "__init__", "__main__", "main", "app", "router",
             "lifespan", "startup", "shutdown", "on_startup", "on_shutdown",
             "setup", "teardown", "conftest", "pytest_configure",
@@ -2133,30 +2263,30 @@ class CodeGraph(BaseFacultyGraph):
         self._keyword_cache_order.append(cache_key)
 
         return final
-    
+
     def get_context_for_chunk(self, chunk_id: str, depth: int = 1) -> Dict[str, Any]:
         """
         Get the full context for a chunk, including its callers and callees.
-        
+
         This is what you inject into the LLM prompt for surgical context.
         """
         chunk = self.chunks.get(chunk_id)
         if not chunk:
             return {}
-        
+
         context = {
             "chunk": chunk,
             "callers": [],
             "callees": [],
         }
-        
+
         # Get callers
         for caller_name in chunk.called_by[:10]:  # Limit to 10
             caller_ids = self.by_name.get(caller_name, [])
             for cid in caller_ids[:2]:  # Max 2 per name
                 if cid in self.chunks:
                     context["callers"].append(self.chunks[cid])
-        
+
         # Get callees
         for callee_name in chunk.calls[:10]:
             callee_ids = self.by_name.get(callee_name, [])
@@ -2572,18 +2702,18 @@ class CodeGraph(BaseFacultyGraph):
     def export_for_embedding(self) -> List[Dict[str, Any]]:
         """
         Export chunks in a format ready for embedding with MindClient.
-        
+
         Each chunk becomes a document with metadata for filtering.
         """
         documents = []
-        
+
         for chunk in self.chunks.values():
             # Build the text to embed
             text_parts = [chunk.signature]
             if chunk.docstring:
                 text_parts.append(chunk.docstring)
             text_parts.append(chunk.body_preview)
-            
+
             doc = {
                 "id": chunk.id,
                 "text": "\n".join(text_parts),
@@ -2832,7 +2962,7 @@ class CodeGraph(BaseFacultyGraph):
 
         # Batches are applied to chunks inline and released, so this only tracks
         # WHICH batches completed — never the embedding payloads themselves.
-        _APPLIED = "applied"
+        _APPLIED = "applied"  # noqa: N806 - module-lifetime guard, not mutable state
         results: List[Optional[str]] = [None] * len(batches)
         consecutive_failures = 0
         new_count = 0
@@ -3588,8 +3718,8 @@ class CodeGraph(BaseFacultyGraph):
                 f"Rate each code function's relevance to the query on a scale 0-9.\n"
                 f"Query: {query}\n\n"
                 f"Candidates:\n" + "\n".join(items) + "\n\n"
-                f"Reply ONLY with one number (0-9) per line, one line per candidate. "
-                f"No explanations."
+                "Reply ONLY with one number (0-9) per line, one line per candidate. "
+                "No explanations."
             )
             try:
                 text = await _llm_generate(prompt, model=ELASTIC_REFLEX, max_tokens=50)
@@ -4115,21 +4245,21 @@ class CodeGraph(BaseFacultyGraph):
 async def main():
     """CLI entry point."""
     import sys
-    
+
     root_path = sys.argv[1] if len(sys.argv) > 1 else str(Path(__file__).parent.parent.parent)
-    
+
     print(f"\n{'='*60}")
     print("CODE GRAPH - Python AST Indexer")
     print(f"{'='*60}")
     print(f"Root: {root_path}")
-    
+
     graph = CodeGraph(max_workers=8)
-    
+
     def on_progress(progress: float, message: str):
         print(f"[{progress*100:5.1f}%] {message}")
-    
+
     stats = await graph.index_codebase(root_path, on_progress=on_progress)
-    
+
     print(f"\n{'='*60}")
     print("INDEXING COMPLETE")
     print(f"{'='*60}")
@@ -4138,36 +4268,36 @@ async def main():
     print(f"  Functions: {stats['functions']:,}")
     print(f"  Methods:   {stats['methods']:,}")
     print(f"  Classes:   {stats['classes']:,}")
-    print(f"\nTiming:")
+    print("\nTiming:")
     print(f"  Discovery:  {stats['discovery_ms']:.0f}ms")
     print(f"  Parsing:    {stats['parsing_ms']:.0f}ms")
     print(f"  Call graph: {stats['backfill_ms']:.0f}ms")
     print(f"  Total:      {stats['total_ms']:.0f}ms")
-    
+
     # Test query
     print(f"\n{'='*60}")
     print("QUERY TEST: 'IRCEngine'")
     print(f"{'='*60}")
-    
+
     chunks = await graph.query("IRCEngine", max_results=5)
-    
+
     for i, chunk in enumerate(chunks):
         print(f"\n{i+1}. {chunk.chunk_type.value}: {chunk.name}")
         print(f"   File: {Path(chunk.source_path).name}:{chunk.start_line}")
         print(f"   Calls: {chunk.calls[:5]}{'...' if len(chunk.calls) > 5 else ''}")
         print(f"   Called by: {chunk.called_by[:5]}{'...' if len(chunk.called_by) > 5 else ''}")
-    
+
     # Show context for first result
     if chunks:
         print(f"\n{'='*60}")
         print(f"FULL CONTEXT FOR: {chunks[0].name}")
         print(f"{'='*60}")
-        
+
         ctx = graph.get_context_for_chunk(chunks[0].id)
         print(f"\nCallers ({len(ctx['callers'])}):")
         for c in ctx["callers"][:3]:
             print(f"  - {c.name} ({c.chunk_type.value})")
-        
+
         print(f"\nCallees ({len(ctx['callees'])}):")
         for c in ctx["callees"][:3]:
             print(f"  - {c.name} ({c.chunk_type.value})")

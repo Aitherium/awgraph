@@ -129,8 +129,20 @@ def build_server():
         graph, _ = await _open(root, build=True)
         n = len(graph.chunks)
         if n == 0:
-            return (f"Indexed 0 chunks from {root} — no importable Python found. "
-                    "awgraph parses Python only.")
+            # The reason matters and differs: with the multilang extra this
+            # really is an empty tree, without it the files may be there and
+            # simply unparseable. Reporting "Python only" in both cases sent a
+            # user with a TypeScript repo looking for a bug that did not exist.
+            from awgraph import multilang  # noqa: PLC0415
+
+            ok, why = multilang.available()
+            if ok:
+                langs = len(multilang.supported_extensions())
+                return (f"Indexed 0 chunks from {root} — nothing indexable found "
+                        f"({langs} extensions supported, documents included).")
+            return (f"Indexed 0 chunks from {root} — no importable Python found, "
+                    f"and multi-language indexing is unavailable ({why}). "
+                    "Install awgraph[multilang] to index other languages and docs.")
         return f"Indexed {n:,} chunks from {root}."
 
     @server.tool(
