@@ -4140,7 +4140,8 @@ class CodeGraph(BaseFacultyGraph):
     _AREA_PREFIXES = [
         ("lib/", "lib"), ("services/", "services"),
         ("apps/AitherVeil/", "frontend"), ("apps/AitherGenesis/", "genesis"),
-        ("apps/AitherNode/", "node"), ("apps/", "apps"),
+        ("apps/awnode/", "node"), ("apps/", "apps"),
+        ("apps/awnode/", "node"), ("apps/", "apps"),
         ("dev/tests/", "tests"), ("boot/", "boot"),
         ("config/", "config"), ("scripts/", "scripts"),
     ]
