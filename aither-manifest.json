@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "1",
+  "name": "awgraph",
+  "description": "A semantic code graph for agents — AST + tree-sitter, call graphs.",
+  "url": "https://aitherium.github.io/awgraph/",
+  "repository": "https://github.com/Aitherium/awgraph",
+  "kind": "tool",
+  "status": "public",
+  "adopt": "Index one repo and ask it who calls one function.",
+  "pairs_with": [
+    "awm",
+    "awdk"
+  ],
+  "includes": []
+}
