@@ -15,11 +15,26 @@ Python 3.10+. Nothing else is required to index and query.
 ## What it costs, measured
 
 The interesting question is not "is a graph better than grep" — it is *what does
-each cost to reach the same answer*. Measured on 33 real commits, where the task
-is a commit message with the answer filenames stripped out and the truth is the
-set of files that commit actually modified. `k` is the result budget, and it is
-swept for **both** retrievers, because `k` bounds grep's output too — sweeping it
-for only one arm manufactures a win:
+each cost to reach the same answer*. The task is a real commit message with the
+answer filenames **stripped out**; the truth is the set of files that commit
+actually modified. `k` is the result budget, and it is swept for **both**
+retrievers, because `k` bounds grep's output too — sweeping it for only one arm
+manufactures a win.
+
+**Measured on two corpora, because the answer depends on how big your repo is.**
+That is the first question anyone asks about a graph retriever, and it deserves a
+number instead of an intuition:
+
+| corpus | Python files | lines | chunks indexed | tasks |
+|---|---|---|---|---|
+| **small** | 88 | 76,527 | ~2,400 | 33 commits |
+| **large** | 2,434 | 1,233,731 | 44,735 | 40 commits |
+
+Both are subtrees of one Python monorepo, and both retrievers are confined to the
+same subtree, so they search the same universe. Neither ever sees the truth set
+while retrieving.
+
+### Small corpus — 76,527 lines
 
 | k | awgraph recall | awgraph tokens | grep recall | grep tokens | awgraph cheaper by |
 |---|---|---|---|---|---|
@@ -30,26 +45,48 @@ for only one arm manufactures a win:
 | 200 | 0.939 | 23,386 | 1.000 | 735,727 | 31x |
 | 400 | **1.000** | 45,269 | 1.000 | 735,727 | **16x** |
 
-**awgraph reaches the same ceiling as exhaustive grep — recall 1.000 — for 16x
-less context. At every budget in between it costs 16-268x fewer tokens.**
+awgraph reaches the same ceiling as exhaustive grep — recall 1.000 — for 16x less
+context. But grep is the better *finder* at this size: it hits 1.000 at k=50 while
+awgraph is still at 0.939.
 
-Read it honestly, because the shape matters:
+### Large corpus — 1,233,731 lines
 
-- **grep is the better finder at any matched `k`.** It reaches 1.000 at k=50
-  while awgraph is still at 0.939. awgraph is not more accurate; it is
-  dramatically cheaper for the same eventual answer, and on a long agent loop
-  the context budget is what runs out first.
-- **grep's cost is not a rounding error.** Reaching 1.000 costs it 668k tokens
-  per task — more than most models will accept in one window at all. That is the
-  real argument: not that grep is worse, but that at full recall it does not fit.
-- **awgraph's token count is for previews**, not whole function bodies —
-  signature + docstring + a body preview per chunk. An agent that then reads the
-  full body of its top hits pays more than the number above. grep's figure is
-  whole files, which is what an agent actually has to read. The comparison is
-  fair at the *retrieval* step and generous to awgraph after it.
+| k | awgraph recall | awgraph tokens | grep recall | grep tokens | awgraph cheaper by |
+|---|---|---|---|---|---|
+| 10 | **0.633** | 1,790 | 0.463 | 529,030 | **296x** |
+| 25 | **0.667** | 4,038 | 0.650 | 988,154 | 245x |
+| 50 | 0.692 | 7,849 | 0.733 | 1,585,684 | 202x |
+| 100 | 0.742 | 14,813 | 0.817 | 2,362,274 | 159x |
+| 200 | 0.825 | 28,210 | 0.917 | 3,336,833 | 118x |
+| 400 | 0.887 | 54,560 | **0.950** | 4,835,491 | 89x |
 
-**Do you actually need the embeddings?** Ablated on the same 33 tasks, same
-index, semantic half off:
+**The ranking flips with scale.** At 76k lines grep wins recall at every matched
+budget. At 1.2M lines awgraph wins it outright at k=10 and k=25 — the budgets that
+fit in a context window — while costing 245-296x less. So the honest answer to
+"does this only pay off on a big codebase?" is: it pays off on both, but for
+different reasons. On a small repo it buys you the same answer for far less. On a
+large one it buys you a *better* answer at any budget you can actually spend.
+
+Read the rest honestly, because the shape matters more than the headline:
+
+- **grep still wins at large `k`, and cannot be used there.** Its 0.950 at k=400
+  costs **4,835,491 tokens per task**. Nothing accepts that in one window, so it
+  is a recall you cannot spend. awgraph's 0.887 costs 54,560.
+- **awgraph did NOT reach grep's ceiling on the large corpus.** On the small one it
+  closed to 1.000 at k=400; here it tops out at 0.887 against grep's 0.950. A sweep
+  that fails to close the gap is a result, not a run to discard.
+- **The two costs diverge, and that is why scale flips it.** Going from the small
+  corpus to the large one, grep's k=400 bill grows 6.6x (735,727 → 4,835,491) while
+  awgraph's grows 1.2x (45,269 → 54,560). grep pays for the repository; awgraph pays
+  for the budget you set.
+- **awgraph's token count is for previews**, not whole function bodies — signature +
+  docstring + a body preview per chunk. An agent that then reads the full body of its
+  top hits pays more than the number above. grep's figure is whole files, which is
+  what an agent actually has to read. The comparison is fair at the *retrieval* step
+  and generous to awgraph after it.
+
+**Do you actually need the embeddings?** Ablated on the small corpus — same 33
+tasks, same index, semantic half off:
 
 | k | keyword only | with embeddings | gain |
 |---|---|---|---|
@@ -58,12 +95,20 @@ index, semantic half off:
 | 50 | 0.909 | 0.939 | +0.030 |
 
 So yes at small `k`, and less so as the budget grows — which is the regime that
-matters, since the whole point is a small `k`. Embedding on CPU is the slow part
-of setup, and this is what it buys.
+matters, since the whole point is a small `k`. Embedding on CPU is the slow part of
+setup, and this is what it buys.
 
-Caveats, because a benchmark without them is marketing: n=33, one repository,
-Python only, and `k` is a knob a caller chooses rather than something the tool
-tunes for itself.
+Caveats, because a benchmark without them is marketing: n=33 and n=40, one
+repository, Python only, and `k` is a knob a caller chooses rather than something
+the tool tunes for itself. Two more worth stating plainly:
+
+- **This measures retrieval, not resolution.** No patch was written and no test was
+  run. Files-retrieved and tasks-fixed are different axes.
+- **The graph arm is not perfectly deterministic, and the spread is ±0.025.** In a
+  single run on the large corpus, the same k=10 query set scored **0.608** in the
+  headline pass and **0.633** in the sweep — same code, same tasks, same process,
+  because the semantic arm times out on some queries under load. Anything smaller
+  than 0.025 here is noise, including differences we would rather were real.
 
 Two things measured and **not** confirmed, recorded because a benchmark that
 only reports its wins is an advertisement:
@@ -76,21 +121,33 @@ only reports its wins is an advertisement:
   nearly grep's full cost, because the fallback fires on almost every task and
   pays both bills. A trigger keyed on result *count* cannot help; it fires when
   the graph is confidently wrong and stays quiet when the graph is confidently
-  right. Keying it on score instead is untested future work.
+  right. It behaves the same way at 1.2M lines: +0.050 recall over the graph alone
+  for **216x** the tokens.
+
+  **The cost model was the flaw, and fixing it is measured.** Treating grep's
+  output as a RESULT SET commits the agent to reading whole files. Used instead as
+  SEEDS — `git grep -il` returns paths, and the previews for those files come from
+  the index — the same fallback costs **16,444 tokens instead of 387,865**, a 23.6x
+  cut, at 0.633 recall against the naive version's 0.658. So seeding is the right
+  way to pay for a fallback and it did **not** buy recall over the graph alone
+  (0.633 either way). Score-keyed triggering remains untested.
 
 ## Setup: index once, embed lazily
 
 Two costs, and only one of them scales with repo size.
 
-| step | 2,400 chunks | 43,730 chunks |
-|---|---|---|
-| parse + index | 49.8s | 75.5s |
-| embed (CPU) | — | ~97 min at ~450 vectors/min |
+| step | 2,400 chunks | 43,730 chunks | 44,735 chunks |
+|---|---|---|---|
+| parse + index | 49.8s | 75.5s | 27.2s |
+| embed | — | ~97 min (CPU, ~450 vectors/min) | 3m23s (GPU server, ~13,200/min) |
 
-**Indexing is close to size-insensitive** — 27x the files for 1.5x the time,
-because parsing runs across workers. Embedding is the part that hurts on CPU, so
-it is optional, cached and incremental: re-indexing reuses stored vectors and
-only embeds what changed.
+**Indexing is close to size-insensitive** — 27x the files for 1.5x the time in the
+first two columns, because parsing runs across workers. The third column is a
+different, faster machine embedding against a GPU inference server rather than CPU
+sentence-transformers, which is the whole difference between 97 minutes and three:
+**the embedding step is the one worth throwing hardware at.** It is also optional,
+cached and incremental — re-indexing reuses stored vectors and only embeds what
+changed.
 
 Without any embedding backend, queries fall back to keyword scoring and still
 work. **That fallback is silent by design and dangerous by nature** — a graph
@@ -210,6 +267,8 @@ axes and should not be compared directly.
 
 Apache 2.0.
 
+---
+
 <!-- aither-ecosystem:start GENERATED from the ecosystem registry. Edits here are overwritten; change the registry instead. -->
 
 ## The aw family
@@ -239,12 +298,6 @@ Each installs on its own, works offline, and needs no account.
 | [aitherkvcache](https://github.com/Aitherium/aitherkvcache) | a vendor's quantisation defaults | sub-byte KV cache kernels you can benchmark yourself |
 | [AitherZero](https://github.com/Aitherium/AitherZero) | a pile of scripts nobody has numbered | numbered, discoverable automation with declarative playbooks |
 | [AitherConnect](https://github.com/Aitherium/AitherConnect) | what a page tells your browser to do | a federated search and desktop bridge you host |
-| [awreason](https://github.com/Aitherium/awreason) | a confident paragraph | the phases it went through, and every tool call it made to get there |
-| [awrecurse](https://github.com/Aitherium/awrecurse) | that everything you pasted in was actually read | which slices it opened, and what it concluded from each |
-| [awprism](https://github.com/Aitherium/awprism) | the first explanation that fits | the ranked alternatives, and the observation that separates them |
-| [awrepl](https://github.com/Aitherium/awrepl) | what the agent believes the value is | the value, printed from the live session |
-| [awresearch](https://github.com/Aitherium/awresearch) | a summary of pages nobody opened | every claim against the source it came from |
-| [awkno](https://github.com/Aitherium/awkno) | that the docs site is up, or that you remember the family | the whole ecosystem in your terminal, with no network at all |
 
 [**awnix**](https://github.com/Aitherium/awnix) is the ground floor — A Linux you can hand to an agent — immutable base, capabilities included.
 
@@ -274,14 +327,5 @@ Every repository here is public. Each publishes an `aither-manifest.json` beside
 | [aitherkvcache](https://github.com/Aitherium/aitherkvcache) | Near-optimal KV cache quantization for LLM inference — sub-byte compression | [docs](https://aitherium.github.io/aitherkvcache/) |
 | [AitherZero](https://github.com/Aitherium/AitherZero) | PowerShell 7+ automation framework — numbered, self-describing scripts | [docs](https://aitherium.github.io/AitherZero/) |
 | [AitherConnect](https://github.com/Aitherium/AitherConnect) | Browser extension — federated AI search, page context, and the Living OS overlay | [docs](https://aitherium.github.io/AitherConnect/) |
-| [awreason](https://github.com/Aitherium/awreason) | A portable reasoning client — sessions, phases, thoughts, and the chain that produced the answer | [docs](https://aitherium.github.io/awreason/) |
-| [awrecurse](https://github.com/Aitherium/awrecurse) | Answer a question over a context far larger than the window — recursively, with the trace kept | [docs](https://aitherium.github.io/awrecurse/) |
-| [awprism](https://github.com/Aitherium/awprism) | Turn a failure into ranked hypotheses — and say what would confirm each one | [docs](https://aitherium.github.io/awprism/) |
-| [awrepl](https://github.com/Aitherium/awrepl) | A REPL an agent can actually use — state that survives between turns | [docs](https://aitherium.github.io/awrepl/) |
-| [awresearch](https://github.com/Aitherium/awresearch) | Ask a research question, get a cited report you can check | [docs](https://aitherium.github.io/awresearch/) |
-| [awkno](https://github.com/Aitherium/awkno) | The man page for the Aither World — every brick, stack and law, offline | [docs](https://aitherium.github.io/awkno/) |
-
-<div id="aither-constellation" data-self="awgraph"></div>
-<script src="aither-constellation.js"></script>
 
 <!-- aither-ecosystem:end -->
