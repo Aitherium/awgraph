@@ -6,6 +6,7 @@ the package is truly standalone.
 """
 
 import asyncio
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -19,19 +20,28 @@ def _pyproject_version() -> str:
     at all). Returning a sentinel on failure would make the parity assertion
     vacuously true, so it raises instead — an unanswerable question is not a pass.
     """
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # 3.10: tomllib is 3.11+, and this package
+        tomllib = None           # declares >=3.10 -- caught live by mirror CI
 
     here = Path(__file__).resolve()
     for parent in here.parents:
         candidate = parent / "pyproject.toml"
         if candidate.is_file():
-            data = tomllib.loads(candidate.read_text(encoding="utf-8"))
-            version = data.get("project", {}).get("version")
+            text = candidate.read_text(encoding="utf-8")
+            if tomllib is not None:
+                data = tomllib.loads(text)
+                version = data.get("project", {}).get("version")
+            else:
+                m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+                version = m.group(1) if m else None
             if version:
                 return str(version)
             raise AssertionError("pyproject.toml declares no [project].version")
 
-    from importlib.metadata import PackageNotFoundError, version as dist_version
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as dist_version
 
     try:
         return dist_version("awgraph")
