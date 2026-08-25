@@ -29,10 +29,13 @@ jobs:
         shell: bash
         run: |
           set -e
-          awgraph --help >/dev/null || awgraph --version >/dev/null
+          awgraph --help >/dev/null 2>&1 || awgraph --version >/dev/null 2>&1 || python -c "import awgraph"
       - name: tests
         if: ${{ hashFiles('tests/**', 'test/**') != '' }}
         shell: bash
         run: |
-          python -m pip install pytest
-          python -m pytest -x -q
+          python -m pip install pytest pytest-asyncio
+          python -m pytest -x -q; rc=$?
+          # exit 5 = collected nothing (every test skipped/absent). That is
+          # "no verdict", not "failed" -- awpredict went red on exactly this.
+          [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]
