@@ -9,18 +9,17 @@
   "adopt": "Index one repo and ask it who calls one function.",
   "pairs_with": [
     "awm",
-    "awdk",
-    "awtoll"
+    "awdk"
   ],
   "includes": [],
   "metrics": {
     "files": {
-      "value": 30,
-      "as_of": "2026-08-25T06:17:51-07:00"
+      "value": 28,
+      "as_of": "2026-08-22T18:47:19-07:00"
     },
     "tests": {
       "value": 4,
-      "as_of": "2026-08-25T06:17:51-07:00"
+      "as_of": "2026-08-22T18:47:19-07:00"
     }
   }
 }
