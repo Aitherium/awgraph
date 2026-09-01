@@ -34,7 +34,6 @@ With no argument it picks the newest wheel AND the newest sdist in `dist/`.
 
 from __future__ import annotations
 
-import ast
 import re
 import sys
 import tarfile
@@ -101,68 +100,6 @@ def _entries(path: Path) -> List[Tuple[str, Callable[[], bytes]]]:
     raise CouldNotJudgeError(f"{path.name}: not a wheel or sdist")
 
 
-#: Roots that do not exist once the package is installed from PyPI.
-_MONOREPO_ROOTS = ("lib", "services", "AitherOS")
-
-
-def unguarded_monorepo_imports(blob: bytes) -> List[str]:
-    """Monorepo imports that are NOT inside an ImportError-handling `try`.
-
-    🚨 WHY THIS IS AST AND NOT A REGEX. The regex this replaced was
-    a MULTILINE regex on 'from lib/services', whose leading-whitespace class matched the
-    indentation of an import sitting inside a `try:` -- and a GUARDED import cannot
-    ModuleNotFoundError, which is the entire failure MOAT001 exists to prevent.
-
-    Measured 2026-08-25: it blocked awgraph 1.4.1 with 6 findings across graph.py,
-    registry.py and store.py. All 9 monorepo imports in those files are inside
-    `try: ... except ImportError:` with a `# Not available in public package` fallback --
-    the correct optional-enhancement idiom, and the package installs and runs without
-    them. Zero were unguarded. So the guard was refusing to publish a package that works.
-
-    That is the expensive direction for this kind of rule: a false NEGATIVE ships one bad
-    release, but a false POSITIVE that nobody can satisfy gets the whole gate deleted, and
-    then the real defect ships unnoticed. Narrowing it to the decidable question keeps the
-    protection and removes the flood.
-
-    An unparseable file is FLAGGED, never skipped: it cannot be shown safe, and silently
-    passing what you could not read is how a guard becomes decorative.
-    """
-    try:
-        tree = ast.parse(blob.decode("utf-8", "replace"))
-    except SyntaxError as exc:
-        return [f"unparseable ({exc.msg}) — cannot be shown safe"]
-
-    bad: List[str] = []
-
-    def _handles_import_error(node: ast.Try) -> bool:
-        for h in node.handlers:
-            if h.type is None:  # bare except
-                return True
-            names = ast.unparse(h.type)
-            if "ImportError" in names or "ModuleNotFoundError" in names or "Exception" in names:
-                return True
-        return False
-
-    def walk(node: ast.AST, guarded: bool) -> None:
-        for child in ast.iter_child_nodes(node):
-            child_guarded = guarded
-            if isinstance(node, ast.Try) and child in node.body:
-                child_guarded = guarded or _handles_import_error(node)
-            root = None
-            if isinstance(child, ast.ImportFrom) and child.module:
-                root = child.module.split(".")[0]
-            elif isinstance(child, ast.Import):
-                for a in child.names:
-                    r = a.name.split(".")[0]
-                    if r in _MONOREPO_ROOTS and not child_guarded:
-                        bad.append(f"line {child.lineno}: import {a.name}")
-            if root in _MONOREPO_ROOTS and not child_guarded:
-                bad.append(f"line {child.lineno}: from {child.module}")
-            walk(child, child_guarded)
-
-    walk(tree, False)
-    return bad
-
 def inspect(path: Path) -> List[str]:
     entries = _entries(path)
     if not entries:
@@ -178,10 +115,9 @@ def inspect(path: Path) -> List[str]:
             blob = read()
         except (OSError, zipfile.BadZipFile, tarfile.TarError) as exc:
             raise CouldNotJudgeError(f"{path.name}:{name}: unreadable ({exc})") from exc
-        for where in unguarded_monorepo_imports(blob):
+        if _MONOREPO_IMPORT.search(blob):
             findings.append(f"MOAT001 {path.name}:{name} imports the monorepo "
-                            f"UNGUARDED ({where}) — ModuleNotFoundError once installed. "
-                            f"Wrap it in try/except ImportError with a fallback.")
+                            f"(lib/services/AitherOS) — ModuleNotFoundError once installed")
         for pattern, label in _INTERNAL:
             for hit in set(pattern.findall(blob)):
                 findings.append(f"MOAT002 {path.name}:{name} leaks an {label}: "
@@ -221,26 +157,6 @@ def self_test() -> int:
         ok = got == want
         bad += 0 if ok else 1
         print(f"  {'PASS' if ok else 'FAIL'}  {label}")
-
-    # MOAT001 guarded-vs-unguarded. The regex this replaced could not tell them apart and
-    # blocked awgraph 1.4.1 with 6 findings, all of them correctly-guarded optional
-    # imports. Both directions are pinned: a false positive gets the gate deleted, a false
-    # negative ships a broken package.
-    for src, want, why in (
-        (b"from lib.faculties.CodeGraph import x", True, "top-level unguarded"),
-        (b"import services.foo", True, "plain import unguarded"),
-        (b"from AitherOS.thing import y", True, "AitherOS root unguarded"),
-        (b"def f():\n    from lib.x import y\n", True, "function-level unguarded"),
-        (b"def f(:\n  bad syntax", True, "unparseable is flagged, never skipped"),
-        (b"try:\n    from lib.x import y\nexcept ImportError:\n    y = None\n",
-         False, "guarded by ImportError"),
-        (b"try:\n    from lib.x import y\nexcept ModuleNotFoundError:\n    y = None\n",
-         False, "guarded by ModuleNotFoundError"),
-        (b"def f():\n    try:\n        from lib.x import y\n    except ImportError:\n"
-         b"        pass\n", False, "guarded inside a function"),
-        (b"from collections import defaultdict", False, "stdlib is not a monorepo import"),
-    ):
-        check(f"MOAT001 {why}", bool(unguarded_monorepo_imports(src)), want)
 
     def wheel(members: dict) -> Path:
         p = Path(tempfile.mkdtemp()) / "awgraph-0.0.0-py3-none-any.whl"

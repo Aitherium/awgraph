@@ -2079,8 +2079,11 @@ class CodeGraph(BaseFacultyGraph):
                 if "/tests/" in path_lower or "/test_" in path_lower or path_lower.endswith("_test.py"):
                     continue
 
-            # Skip small chunks
-            if chunk.line_count < min_lines:
+            # Skip small chunks. line_count is 0 for every cache-loaded chunk
+            # (the cache never serialized it), so fall back to the source span
+            # like ReorganizeAnalyzer does — otherwise a min_lines filter drops
+            # EVERY chunk and the scan reports zero orphans forever.
+            if (chunk.line_count or (chunk.end_line - chunk.start_line + 1)) < min_lines:
                 continue
 
             # Skip user-specified patterns
@@ -4362,9 +4365,17 @@ def get_codegraph(
             _codegraph_indexing = True
             try:
                 if root_path is None:
-                    root_path = os.environ.get(
-                        "AITHEROS_ROOT", str(Path(__file__).parent.parent.parent)
-                    )
+                    # The old fallback `Path(__file__).parent.parent.parent`
+                    # resolved to the PYTHON STDLIB for a site-packages copy
+                    # (/usr/local/lib/python3.14t) — every default-root index
+                    # walked the stdlib, so the dead-code sweep "found"
+                    # AbstractPickleTests and nothing in AitherOS (measured
+                    # 2026-09-01: 63885 chunks across stdlib paths). The
+                    # process CWD is the codebase root for every in-fleet
+                    # consumer (genesis/worker/cognition-advanced run with
+                    # working_dir=/app/AitherOS); only a nonexistent CWD
+                    # falls back further.
+                    root_path = os.environ.get("AITHEROS_ROOT") or os.getcwd()
 
                 # Try loading persistent chunk cache first
                 cache_loaded = _load_chunk_cache(cg, root_path)
@@ -4528,6 +4539,12 @@ def _save_chunk_cache(cg: "CodeGraph", root_path: str):
             "tenant_id": chunk.tenant_id,
             "workspace_id": chunk.workspace_id,
             "stable_id": chunk.stable_id,
+            # line_count/complexity were dropped from the cache, so every
+            # loaded chunk carried the dataclass default (0) and find_orphans
+            # filtered them all out — the dead-code sweep could never see a
+            # single orphan. Persist them so a reindex restores real values.
+            "line_count": chunk.line_count,
+            "complexity": chunk.complexity,
         }
 
     # Record file mtimes for incremental detection
@@ -4601,6 +4618,12 @@ def _load_chunk_cache(cg: "CodeGraph", root_path: str) -> bool:
             chunk.tenant_id = data.get("tenant_id", "platform")
             chunk.workspace_id = data.get("workspace_id", "")
             chunk.stable_id = data.get("stable_id")
+            # Old caches never serialized line_count, so every loaded chunk
+            # carried the dataclass default 0 and every min_lines filter
+            # (find_orphans) dropped it. Restore from cache or fall back to
+            # the source span so loaded chunks carry a real size.
+            chunk.line_count = data.get("line_count") or (chunk.end_line - chunk.start_line + 1)
+            chunk.complexity = data.get("complexity", 0)
             cg.chunks[cid] = chunk
             cg._tenant_chunks[chunk.tenant_id].add(cid)
             cg.by_name[chunk.name].append(cid)
