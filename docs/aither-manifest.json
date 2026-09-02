@@ -10,17 +10,18 @@
   "pairs_with": [
     "awm",
     "awdk",
-    "awtoll"
+    "awtoll",
+    "awembed"
   ],
   "includes": [],
   "metrics": {
     "files": {
-      "value": 30,
-      "as_of": "2026-08-26T08:21:46-07:00"
+      "value": 32,
+      "as_of": "2026-09-02T16:28:20-07:00"
     },
     "tests": {
-      "value": 4,
-      "as_of": "2026-08-26T08:21:46-07:00"
+      "value": 6,
+      "as_of": "2026-09-02T16:28:20-07:00"
     }
   }
 }
