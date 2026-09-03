@@ -68,7 +68,7 @@ def test_worktree_dot_git_file_not_dir_counts(tmp_path):
 
 #: Decided at COLLECTION time, not inside the body. A body-level skip fires
 #: after partial execution, so a genuine failure would be reported as "skipped"
-#: and CI would stay green - the exact hole PQ004 exists to close.
+#: and CI would stay green - the exact hole a collection-time skip closes.
 _TMP = Path(tempfile.gettempdir())
 _TMP_INSIDE_A_REPO = any((d / ".git").exists() for d in [_TMP, *_TMP.parents])
 
