@@ -1313,6 +1313,13 @@ class CodeGraph(BaseFacultyGraph):
     - What calls each function/method (backfilled)
     """
 
+    #: How many chunks ONE non-hit file may contribute to an expansion.
+    #: Without it a single crowded module can spend the whole structural
+    #: budget, which is the same starvation the call-edge ordering above
+    #: exists to prevent -- just arriving from the other direction.
+    _EXPAND_MAX_PER_FILE = 3
+
+
     _scope_level = "tenant"  # Chunks carry tenant_id for multi-tenant isolation
     _QUERY_CACHE_MAX = 512  # Max cached query embeddings (~1.5MB at 768-dim)
 
@@ -1729,6 +1736,46 @@ class CodeGraph(BaseFacultyGraph):
         }
         logger.info(f"LangExtract enrichment complete: {stats}")
         return stats
+
+    @staticmethod
+    def _git_root(start: str):
+        """The nearest enclosing git repository root, or None outside one.
+
+        Restored 2026-09-03. `tests/test_git_root_discovery.py` came back in the
+        222-file sweep restore (592e4bf4f1) and this half did not, so the suite
+        had asserted on a method that existed in NO commit -- which is why
+        awgraph's publish lane had been red since 2026-09-01 and 1.4.3 never
+        reached PyPI.
+
+        The shape it exists to keep dead, from that test's own docstring:
+
+            if not (root / ".git").exists(): return not_a_git_repo
+
+        tested against the INDEXED path. Indexing a subtree is the normal case --
+        a whole monorepo takes far longer than the package you care about -- so
+        that one-liner silently disabled commit counts, author counts and churn.
+        It is a stats field nobody reads, so nothing failed: no exception, no
+        warning, and the index reported success with every other number intact.
+        Measured 2026-08-19 on a 2,434-file subtree index, git enrichment
+        contributed nothing to ranking while looking fully wired.
+
+        `.git` is accepted as a FILE as well as a directory: that is how a git
+        worktree records its link, and rejecting it would put every worktree back
+        into the silent-no-enrichment state this walk exists to end.
+        """
+        try:
+            here = Path(start).resolve()
+        except (OSError, ValueError):
+            return None
+        if here.is_file():
+            here = here.parent
+        for candidate in (here, *here.parents):
+            marker = candidate / ".git"
+            # NEAREST wins: the loop returns on the first hit walking upward, so a
+            # nested repo resolves to itself rather than to its parent.
+            if marker.is_dir() or marker.is_file():
+                return candidate
+        return None
 
     def _path_to_module_prefix(self, path: str) -> str:
         """Convert a file path to a possible module prefix (e.g. lib.faculties.CodeGraph)."""
@@ -3411,7 +3458,8 @@ class CodeGraph(BaseFacultyGraph):
         """
         Expand a set of hit chunk IDs with structurally and semantically related chunks.
 
-        Phase 1 — Structural: parent class, sibling methods, file neighbors, call graph.
+        Phase 1 — Structural: CALL EDGES FIRST, then parent class, sibling methods
+                  and same-file neighbours, each file capped at _EXPAND_MAX_PER_FILE.
         Phase 2 — Semantic diversity: embedding-similar chunks from DIFFERENT files
                   than the initial hits.  This is what lifts hard/architectural queries.
         """
@@ -3419,48 +3467,72 @@ class CodeGraph(BaseFacultyGraph):
         seen = set(chunk_ids)
         hit_files = {self.chunks[cid].source_path for cid in chunk_ids if cid in self.chunks}
 
-        # --- Phase 1: structural expansion (same as before) ---
+        # --- Phase 1: structural expansion ---
+        # ORDER IS THE FIX. The three steps used to run siblings -> same-file
+        # neighbours -> call edges against a shared `max_expand // 2` budget, so on
+        # any crowded module the budget was gone before the only step that crosses
+        # a file boundary by STRUCTURE ever executed. Measured 2026-08-19 on a
+        # 2,434-file / 1.23M-line index over 40 real commit tasks: at k=10 this arm
+        # returned a mean 8.3 distinct files against grep's flat 10.0, fewer than
+        # 10 on 30 of 40 tasks, and 14 of the 19 tasks with a miss were starved
+        # exactly that way -- the missed files being one call edge from a scoring
+        # chunk and sharing no vocabulary with the task at all.
+        #
+        # Rebuilt 2026-09-03 from tests/test_expansion_prefers_call_edges.py, which
+        # is the only surviving record of it: the implementation was lost in the
+        # 2026-08-26 .git metadata destruction before it was ever committed, and
+        # the 222-file restore brought back the tests alone. Those tests carry
+        # mutation guards reproducing this old ordering, so a revert fails there
+        # rather than going quiet -- which matters because the failure mode is a
+        # SILENT NARROWING of results that no other check can see.
         structural_budget = max_expand // 2 or max_expand
+        per_file: Dict[str, int] = defaultdict(int)
 
+        def _take(c) -> bool:
+            """Accept a chunk unless its file has had its share. True if accepted.
+
+            Seed files are exempt: they are already hits, so capping them would
+            spend the budget re-deciding something already decided.
+            """
+            if c is None or c.id in seen:
+                return False
+            if c.source_path not in hit_files:
+                if per_file[c.source_path] >= self._EXPAND_MAX_PER_FILE:
+                    return False
+                per_file[c.source_path] += 1
+            seen.add(c.id)
+            expanded.append(c)
+            return True
+
+        # 1a. CALL EDGES FIRST -- the only structural step that reliably crosses a
+        # file boundary, and therefore the one that must not be starved.
+        for cid in list(chunk_ids):
+            if len(expanded) >= structural_budget:
+                break
+            ctx = self.get_context_for_chunk(cid)
+            for related in ctx.get("callers", []) + ctx.get("callees", []):
+                if _take(related) and len(expanded) >= structural_budget:
+                    break
+
+        # 1b/1c. Then the same-file structure, with whatever budget survives.
         for cid in list(chunk_ids):
             chunk = self.chunks.get(cid)
             if not chunk or len(expanded) >= structural_budget:
                 break
 
-            # 1a. Parent class: if this is a method, pull the class chunk
             if chunk.parent_class:
                 for other_id in self.by_name.get(chunk.parent_class, []):
-                    if other_id not in seen and other_id in self.chunks:
-                        seen.add(other_id)
-                        expanded.append(self.chunks[other_id])
-
-                # Sibling methods from same class (O(1) via by_class index)
+                    if _take(self.chunks.get(other_id)) and len(expanded) >= structural_budget:
+                        break
                 for other_id in self.by_class.get(chunk.parent_class, []):
-                    if other_id not in seen:
-                        other = self.chunks.get(other_id)
-                        if other and other.chunk_type == ChunkType.METHOD:
-                            seen.add(other_id)
-                            expanded.append(other)
-                            if len(expanded) >= structural_budget:
-                                break
+                    other = self.chunks.get(other_id)
+                    if other and other.chunk_type == ChunkType.METHOD:
+                        if _take(other) and len(expanded) >= structural_budget:
+                            break
 
-            # 1b. Same-file neighbors (functions/classes in the same module)
-            file_siblings = self.by_file.get(chunk.source_path, [])
-            for sib_id in file_siblings[:8]:
-                if sib_id not in seen and sib_id in self.chunks:
-                    seen.add(sib_id)
-                    expanded.append(self.chunks[sib_id])
-                    if len(expanded) >= structural_budget:
-                        break
-
-            # 1c. Call-graph expansion (1 level)
-            ctx = self.get_context_for_chunk(cid)
-            for related in ctx.get("callers", []) + ctx.get("callees", []):
-                if related.id not in seen:
-                    seen.add(related.id)
-                    expanded.append(related)
-                    if len(expanded) >= structural_budget:
-                        break
+            for sib_id in self.by_file.get(chunk.source_path, [])[:8]:
+                if _take(self.chunks.get(sib_id)) and len(expanded) >= structural_budget:
+                    break
 
         # --- Phase 2: semantic diversity (cross-file) ---
         diversity_budget = max_expand - len(expanded)
