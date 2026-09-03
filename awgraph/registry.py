@@ -178,7 +178,11 @@ class CodeGraphRegistry:
         # For default root, reuse the existing singleton
         if norm == self._default_root:
             try:
-                from lib.faculties.CodeGraph import get_codegraph
+                # awgraph's OWN CodeGraph. This read `lib.faculties.CodeGraph`,
+                # which is the monorepo module this package was extracted FROM --
+                # a leftover from before awgraph existed, and unreachable once
+                # installed. `awgraph.graph` exports both names.
+                from awgraph.graph import get_codegraph
                 cg = get_codegraph(auto_index=auto_index)
                 self._instances[norm] = cg
                 self._owners[norm] = PLATFORM_TENANT  # Always platform
@@ -193,7 +197,7 @@ class CodeGraphRegistry:
 
         # External root: create a new CodeGraph instance with isolated cache
         try:
-            from lib.faculties.CodeGraph import CodeGraph
+            from awgraph.graph import CodeGraph
             cache_dir = self._cache_dir_for(norm, tenant_id)
             cache_dir.mkdir(parents=True, exist_ok=True)
 

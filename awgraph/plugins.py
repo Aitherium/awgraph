@@ -58,6 +58,12 @@ __all__ = [
     "async_client_class",
     "embedding_engine",
     "degradation_registry",
+    "chunk_id_migrator",
+    "langextract_faculty",
+    "offload",
+    "topo_order",
+    "code_index",
+    "node_id_manager",
 ]
 
 # Every supported hook, with the reason a host would set it. A name not in here
@@ -69,6 +75,32 @@ _SUPPORTED: Dict[str, str] = {
     "async_client": "httpx.AsyncClient-compatible class; default: httpx.AsyncClient",
     "embedding_engine": "() -> engine with .embed/.embed_batch; default: None",
     "degradation_registry": "object with register_ok/register_failed",
+    "langextract_faculty": (
+        "() -> (LANGEXTRACT_AVAILABLE, LangExtractFaculty); default: None. "
+        "Absent means SKIP enrichment, which is what the guarded import already did."
+    ),
+    "offload": (
+        "async (fn, *args) -> result; default: loop.run_in_executor. The host's "
+        "version stamps the caller's loop into a ContextVar so background work "
+        "scheduled inside the offloaded subtree can still find it."
+    ),
+    "topo_order": (
+        "(members, name_to_ids, ...) -> ordered ids; default: None (keep the "
+        "caller's order). Dependency-correct ordering measured 62.9% -> 78.6%."
+    ),
+    "code_index": (
+        "() -> (CodeIndex, IndexScope); default: None. The host's vector-store "
+        "client for Qdrant persistence. Absent means DO NOT persist."
+    ),
+    "node_id_manager": (
+        "() -> a class with .from_dict(); default: None. Restores a persisted "
+        "stable-id manager so a reindex reuses existing (name, path) -> id maps."
+    ),
+    "chunk_id_migrator": (
+        "(chunks, manager) -> (new_chunks, old_to_new, manager); default: None. "
+        "The host's v1->v2 chunk-id migration. A published awgraph has no v1 "
+        "index to migrate, so absent means SKIP, not degrade."
+    ),
 }
 
 _HOOKS: Dict[str, Optional[Any]] = {name: None for name in _SUPPORTED}
@@ -154,3 +186,45 @@ def degradation_registry():
     from awgraph.degradation import get_registry
 
     return get_registry()
+
+
+def chunk_id_migrator():
+    """The host's chunk-id migrator, or None.
+
+    Replaces a `from lib.faculties.CodeGraphIDMigration import migrate_chunks`
+    inside awgraph. That import was GUARDED, so it never raised -- but a guarded
+    reach into the monorepo is still a published package depending on code the
+    installer does not have, and its fallback is the silent-degradation shape
+    (the classic version of this: the only consumer that logged anything called
+    it "not available", and the fallback quietly did less). The dependency is
+    inverted instead: the host REGISTERS its migrator, this package never
+    reaches for it.
+
+    None is the correct answer for a stranger's install -- a fresh index has no
+    v1 chunks to migrate -- so absent means SKIP, not degrade.
+    """
+    return _HOOKS.get("chunk_id_migrator")
+
+def langextract_faculty():
+    """Host LangExtract, or None. Absent means skip enrichment."""
+    return _HOOKS.get("langextract_faculty")
+
+
+def offload():
+    """Host event-loop offload, or None to use run_in_executor."""
+    return _HOOKS.get("offload")
+
+
+def topo_order():
+    """Host dependency-ordering, or None to keep the caller's order."""
+    return _HOOKS.get("topo_order")
+
+
+def code_index():
+    """Host vector-store client, or None -- then DO NOT persist."""
+    return _HOOKS.get("code_index")
+
+
+def node_id_manager():
+    """Host stable-id manager class, or None."""
+    return _HOOKS.get("node_id_manager")

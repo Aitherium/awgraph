@@ -140,14 +140,27 @@ def _detect_vllm() -> Optional[str]:
     return _vllm_url
 
 def _vllm_model_name() -> str:
-    """Get the actual model name served by vLLM."""
-    return _vllm_model or "deepseek-r1:14b"
+    """The model name the configured backend serves."""
+    return _vllm_model or _ELASTIC_REASON_DEFAULT
 
 
-# Model mapping — vLLM serves deepseek-r1:14b
-ELASTIC_REFLEX = "llama3.2:latest"       # Fast: neurons, rerank, embeddings
-ELASTIC_AGENT = "mistral-nemo:latest"    # Balanced: agent tasks, tool calling
-ELASTIC_REASON = "deepseek-r1:14b"       # Deep: analysis, complex reasoning
+# Model mapping. These are DEFAULTS a host overrides, not a roster.
+#
+# They were hardcoded to specific serving names until 2026-09-03. A publisher's
+# model roster is not a credential and no secret scanner fires on it -- it is
+# simply the shape of somebody's deployment, and it should not ride along in a
+# package other people install.
+#
+# Env-overridable with neutral defaults, which is also just better for a
+# published package: a stranger's backend serves whatever they run, and awgraph
+# had no way to be told so.
+_ELASTIC_REFLEX_DEFAULT = os.getenv("AWGRAPH_MODEL_FAST", "fast-local")
+_ELASTIC_AGENT_DEFAULT = os.getenv("AWGRAPH_MODEL_BALANCED", "balanced-local")
+_ELASTIC_REASON_DEFAULT = os.getenv("AWGRAPH_MODEL_DEEP", "deep-local")
+
+ELASTIC_REFLEX = _ELASTIC_REFLEX_DEFAULT   # Fast: neurons, rerank, embeddings
+ELASTIC_AGENT = _ELASTIC_AGENT_DEFAULT     # Balanced: agent tasks, tool calling
+ELASTIC_REASON = _ELASTIC_REASON_DEFAULT   # Deep: analysis, complex reasoning
 
 
 # ── Code-specialized embedding (CodeRankEmbed) ───────────────────────────────
@@ -163,7 +176,15 @@ _CODE_EMBED_MODEL = os.environ.get("AITHER_CODEGRAPH_EMBED_MODEL", "").strip()
 _CODE_QUERY_PREFIX = os.environ.get(
     "AITHER_CODEGRAPH_QUERY_PREFIX",
     "Represent this query for searching relevant code: ",
-)
+).replace("\\n", "\n")
+# `.replace("\\n", "\n")`: instruction-tuned embedders (Qwen3-Embedding, the distilled
+# the code-specialised student) put a REAL newline between the task line and "Query: ".
+# A podman quadlet's Environment= cannot carry one -- quadlet keeps a quoted `\n` as
+# the two characters (measured 2026-09-02: `--env "X=a\nb"` rendered verbatim), and a
+# raw newline in the unit file is a parse error that takes down every unit in the
+# directory. So operators write the two characters and this line makes them the
+# newline the model was trained with; compose YAML strings arrive with a real
+# newline already and pass through unchanged.
 
 
 def _code_embed_enabled() -> bool:
@@ -304,10 +325,15 @@ def _finalize_stable_ids(cg: "CodeGraph") -> Dict[str, str]:
         return {}  # already finalized
 
     from collections import defaultdict
-    try:
-        from lib.faculties.CodeGraphIDMigration import migrate_chunks
-    except ImportError:
-        # Not available in public package — skip v1 migration
+    # The host REGISTERS its migrator; awgraph never reaches for it. This was
+    # `from lib.faculties.CodeGraphIDMigration import migrate_chunks` in a
+    # try/except -- guarded, so it never raised, and still a published package
+    # depending on code the installer does not have, which a publish-time wheel
+    # inspection rightly refuses: the fallback is the silent-degradation shape.
+    # None is the CORRECT answer on a stranger's install, because a fresh index
+    # has no v1 chunks to migrate -- absent means SKIP, not degrade.
+    migrate_chunks = _plugins.chunk_id_migrator()
+    if migrate_chunks is None:
         return cg.chunks
 
     try:
@@ -1666,14 +1692,13 @@ class CodeGraph(BaseFacultyGraph):
         Returns:
             Stats dict with enrichment counts.
         """
-        try:
-            from lib.faculties.LangExtractFaculty import (
-                LANGEXTRACT_AVAILABLE,
-                LangExtractFaculty,
-            )
-        except ImportError:
-            logger.warning("LangExtractFaculty not available — skipping enrichment")
+        _lx = _plugins.langextract_faculty()
+        if _lx is None:
+            logger.warning("LangExtract faculty not configured — skipping enrichment")
             return {"enriched_chunks": 0, "extractions": 0, "skipped": "not_installed"}
+        # noqa N806: these bind the CLASS/flag the host hands back, and keeping
+        # the imported spelling is what makes this a drop-in for the old import.
+        LANGEXTRACT_AVAILABLE, LangExtractFaculty = _lx()  # noqa: N806
 
         if not LANGEXTRACT_AVAILABLE:
             return {"enriched_chunks": 0, "extractions": 0, "skipped": "not_installed"}
@@ -2292,11 +2317,14 @@ class CodeGraph(BaseFacultyGraph):
             tokens = [query_lower]
 
         # Offload CPU-bound scoring loop to thread pool (event-loop offload)
-        try:
-            from lib.core.EventLoopMonitor import offload
-            results = await offload(self._score_chunks_against_tokens, tokens, scope_paths, tenant_id)
-        except ImportError:
-            # Not available in public package — use standard asyncio
+        _offload = _plugins.offload()
+        if _offload is not None:
+            # The host's offload stamps the caller's loop into a ContextVar, so
+            # background work scheduled inside the offloaded subtree can still
+            # reach it. A bare to_thread loses that silently.
+            results = await _offload(
+                self._score_chunks_against_tokens, tokens, scope_paths, tenant_id)
+        else:
             loop = asyncio.get_event_loop()
             results = await loop.run_in_executor(None, self._score_chunks_against_tokens, tokens, scope_paths, tenant_id)
 
@@ -2359,7 +2387,9 @@ class CodeGraph(BaseFacultyGraph):
         # 78.6%. The gap is not cosmetic: reading a dependent before its dependency is
         # what produced four separate defects in one day of K3 engine work.
         try:
-            from lib.cognitive.dependency_order import topo_order
+            topo_order = _plugins.topo_order()
+            if topo_order is None:
+                raise ImportError("no topo_order hook configured")
 
             members = {}
             for c in context["callees"] + [chunk] + context["callers"]:
@@ -3146,11 +3176,11 @@ class CodeGraph(BaseFacultyGraph):
         corresponding collection. Only chunks with embeddings are upserted.
         Never raises — any failure is logged at debug level.
         """
-        try:
-            from lib.clients.code_index import CodeIndex, IndexScope
-        except ImportError:
-            logger.debug("[CodeGraph] CodeIndex unavailable for Qdrant persist")
+        _ci = _plugins.code_index()
+        if _ci is None:
+            logger.debug("[CodeGraph] no code_index hook — skipping Qdrant persist")
             return
+        CodeIndex, IndexScope = _ci()  # noqa: N806 - host classes, imported spelling kept
 
         # Group chunks by the FULL scope tuple (tenant, workspace, user, agent)
         # so user/agent-private code is never merged into a broader scope — a
@@ -4663,8 +4693,9 @@ def _load_chunk_cache(cg: "CodeGraph", root_path: str) -> bool:
     # reindex/migration reuses existing (name, path) → id mappings.
     if cache.get("id_manager"):
         try:
-            from lib.faculties.StableNodeIDLayer import StableNodeIDManager
-            cg._id_manager = StableNodeIDManager.from_dict(cache["id_manager"])
+            _mgr = _plugins.node_id_manager()
+            if _mgr is not None:
+                cg._id_manager = _mgr().from_dict(cache["id_manager"])
         except Exception:
             pass
 

@@ -179,12 +179,11 @@ class CodeGraphStore:
         try:
             from awgraph.graph import CodeChunk, ChunkType
         except ImportError:
-            try:
-                from lib.faculties.CodeGraph import CodeChunk, ChunkType
-            except ImportError:
-                # Fallback: create a generic dict-like object
-                # This should not happen in normal usage
-                return dict(row)
+            # The nested `lib.faculties.CodeGraph` fallback that used to sit here
+            # was unreachable by construction: `awgraph.graph` is a sibling module
+            # of this one, so if it cannot be imported neither can this file. It
+            # only ever made the wheel look like it depended on the monorepo.
+            return dict(row)
 
         return CodeChunk(
             id=row["id"],
