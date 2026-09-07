@@ -5,6 +5,14 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] - 2026-08-19
+
+### Fixed
+
+- Release repair: the develop merge left 1.3.0 unreleasable; 1.3.1 ships the
+  same feature set as a clean release, and the `__version__` literal now agrees
+  with pyproject.
+
 ## [1.3.0] - 2026-08-19
 
 ### Added
