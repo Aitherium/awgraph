@@ -5,6 +5,17 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.4] - 2026-09-07
+
+### Fixed
+
+- Read commands (`query`, `callers`, `calls`, `stats`) now hydrate the persisted
+  embedding cache on open. `embed_chunks()` writes vectors to a package-keyed
+  `codegraph_embeddings.pkl`, and nothing on the read path opened it: after a
+  successful embedding pass `awgraph stats` still reported 0% and `query` ran
+  keyword-only forever. Hydration is HMAC-checked, ~3 s for 300k chunks, and a
+  missing or tampered cache is logged rather than fatal.
+
 ## [1.3.1] - 2026-08-19
 
 ### Fixed
@@ -188,7 +199,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Benchmarks (measured 2026-07)
 
-On AitherOS/lib/faculties (scope, 200 commits, 15 sampled, 2400 chunks, 800 embedded):
+On a ~2,400-chunk internal package (200 commits, 15 sampled, 800 embedded):
 
 | Retriever | Recall@10 | Avg tokens | Notes |
 |-----------|-----------|-----------|-------|
