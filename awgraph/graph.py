@@ -4668,6 +4668,49 @@ def _save_chunk_cache(cg: "CodeGraph", root_path: str):
         logger.warning(f"[CodeGraph] Failed to save chunk cache: {e}")
 
 
+def _embedding_cache_path() -> str:
+    """The ONE place `embed_chunks` persists vectors when no cache_path is given.
+
+    It keys on the package directory, not the indexed root — so it is shared
+    across roots and must be resolved identically by every reader. Measured
+    2026-09-07: a 35-minute pass embedded 304,429 chunks into this file and
+    `awgraph stats` still printed 0% because nothing on the read path opened it.
+    """
+    return _get_data_path(str(Path(__file__).parent.parent.parent), "codegraph_embeddings.pkl")
+
+
+def _hydrate_embeddings(cg: "CodeGraph", cache_path: Optional[str] = None) -> int:
+    """Attach persisted vectors to the chunks already loaded on ``cg``.
+
+    Returns how many chunks received a vector. Cheap (2.9 s for 304k rows) and
+    idempotent; skips chunks that already carry one. Never raises — a missing,
+    tampered or unreadable cache means keyword-only, which is what callers get
+    today anyway, but it is LOGGED, never silent.
+    """
+    path = cache_path or _embedding_cache_path()
+    if not cg.chunks or not os.path.exists(path):
+        return 0
+    if not _verify_pickle_hmac(path):
+        logger.warning("[CodeGraph] Embedding cache HMAC invalid — queries stay keyword-only")
+        return 0
+    try:
+        with open(path, "rb") as f:
+            cached = pickle.load(f)
+    except Exception as e:  # noqa: BLE001 - a read path must not crash the CLI
+        logger.warning(f"[CodeGraph] Failed to load embedding cache: {e}")
+        return 0
+    applied = 0
+    for chunk_id, chunk in cg.chunks.items():
+        if chunk.embedding is None:
+            vec = cached.get(chunk_id)
+            if vec is not None:
+                chunk.embedding = _as_f32(vec)
+                applied += 1
+    if applied:
+        cg._has_embeddings_cached = True
+    return applied
+
+
 def _load_chunk_cache(cg: "CodeGraph", root_path: str) -> bool:
     """Load persisted chunks from disk. Returns True if cache was valid."""
     cache_path = _get_data_path(root_path, "codegraph_chunks.pkl")

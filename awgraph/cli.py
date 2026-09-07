@@ -52,13 +52,17 @@ async def _open_graph(root: str, build: bool):
     (load the persisted cache). A read that silently re-indexed would turn a
     missing index into a multi-minute pause that looks like a hang.
     """
-    from awgraph.graph import CodeGraph, _load_chunk_cache
+    from awgraph.graph import CodeGraph, _hydrate_embeddings, _load_chunk_cache
 
     graph = CodeGraph(root_path=root, auto_index=False)
     if build:
         await graph.index_codebase(root)
         return graph, True
     loaded = _load_chunk_cache(graph, root)
+    if loaded and graph.chunks:
+        # The embedding pass persists vectors in a separate cache; without this
+        # every read command was keyword-only and `stats` reported 0% forever.
+        _hydrate_embeddings(graph)
     return graph, bool(loaded and graph.chunks)
 
 
