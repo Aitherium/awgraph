@@ -5,6 +5,14 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.5] - 2026-09-07
+
+### Fixed
+
+- Publish repair: the v1.4.4 release was refused by the sdist moat guard (a test
+  comment named an internal checker rule id), so 1.4.4 never reached PyPI. 1.4.5
+  ships the same code with that comment reworded.
+
 ## [1.4.4] - 2026-09-07
 
 ### Fixed
