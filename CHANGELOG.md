@@ -5,6 +5,21 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.8] - 2026-09-11
+
+### Fixed
+
+- The embed text window now reaches the END of a long preview: head 180 + "..." +
+  tail 110 for previews over 600 chars, unchanged below that. Measured on the
+  llama-server entrypoint chunk (2,361-char preview): head-only text put the gold
+  file at cosine **rank 11** for the question it answers; head+tail put it at
+  **rank 4** (+0.021, against a 0.0007 slot margin in that field). An entrypoint's
+  discriminating line is its `exec`, and that is at the end. Only long-preview
+  chunks change text, so the re-embed is bounded. The window shape lives in
+  `_embed_text_for_chunk`, pinned by `tests/test_embed_text_window.py` (the long
+  case fails against the old builder by construction; the short case asserts
+  byte-identical output so the change cannot quietly re-embed the whole index).
+
 ## [1.4.7] - 2026-09-11
 
 ### Fixed

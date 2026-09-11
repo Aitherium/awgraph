@@ -1013,6 +1013,43 @@ _MODULE_TABLE_MIN_CHARS = 600    # below this the module-chunk preview still hol
 _MODULE_TABLE_CHARS = 4000       # the table's own preview budget
 _RE_TABLE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]{2,39}$")
 
+#: The embed text window. A preview longer than this cannot be represented by its
+#: head alone: measured 2026-09-11 on the llama-server entrypoint chunk (2,361-char
+#: preview) -- head-only put the gold file at cosine rank 11 for the question it
+#: answers; head 180 + "..." + tail 110 put it at rank 4 (+0.021 cosine, 30x the
+#: 0.0007 slot margin), because an entrypoint's discriminating line (the exec) is
+#: at its END. Same lesson as the module-table keys: the window is 300 chars, so
+#: what is not in it does not exist to the vector.
+_EMBED_PREVIEW_HEAD = 180
+_EMBED_PREVIEW_TAIL = 110
+_EMBED_PREVIEW_HEADTAIL_MIN = 600
+
+
+def _embed_text_for_chunk(chunk: "CodeChunk") -> str:
+    """The text a chunk contributes to its vector (mirrors embed_chunks exactly).
+
+    Kept as a function so the window shape can be asserted by a test: a
+    reconstruction in a diagnostic that drifts from the real builder produces
+    phantom defects -- measured 2026-09-11, a hand-built text "proved" a
+    mixed-space index that did not exist.
+    """
+    parts = [chunk.signature]
+    if chunk.docstring:
+        parts.append(chunk.docstring[:300])
+    if chunk.body_preview:
+        preview = chunk.body_preview
+        if len(preview) > _EMBED_PREVIEW_HEADTAIL_MIN:
+            preview = (preview[:_EMBED_PREVIEW_HEAD] + "\n...\n"
+                       + preview[-_EMBED_PREVIEW_TAIL:])
+        parts.append(preview[:300])
+    if chunk.calls:
+        parts.append(f"calls: {', '.join(chunk.calls[:10])}")
+    if chunk.called_by:
+        parts.append(f"called by: {', '.join(chunk.called_by[:10])}")
+    if chunk.parent_class:
+        parts.append(f"class: {chunk.parent_class}")
+    return "\n".join(parts)
+
 
 def _table_keys(value: ast.AST, limit: int = 16) -> List[str]:
     """Identifier-shaped string literals inside a table value, in walk order.
@@ -3169,22 +3206,13 @@ class CodeGraph(BaseFacultyGraph):
             f"({applied} from cache, {len(self.chunks) - applied - len(need_embedding)} in memory)"
         )
 
-        # Build texts to embed — rich representation for semantic matching
+        # Build texts to embed — rich representation for semantic matching.
+        # The window shape (head+tail for long previews) lives in
+        # `_embed_text_for_chunk` so a test can pin it.
         texts = []
         chunk_ids = []
         for cid, chunk in need_embedding:
-            parts = [chunk.signature]
-            if chunk.docstring:
-                parts.append(chunk.docstring[:300])
-            if chunk.body_preview:
-                parts.append(chunk.body_preview[:300])
-            if chunk.calls:
-                parts.append(f"calls: {', '.join(chunk.calls[:10])}")
-            if chunk.called_by:
-                parts.append(f"called by: {', '.join(chunk.called_by[:10])}")
-            if chunk.parent_class:
-                parts.append(f"class: {chunk.parent_class}")
-            texts.append("\n".join(parts))
+            texts.append(_embed_text_for_chunk(chunk))
             chunk_ids.append(cid)
 
         start = time.perf_counter()
