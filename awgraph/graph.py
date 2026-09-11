@@ -191,6 +191,22 @@ def _code_embed_enabled() -> bool:
     return bool(_CODE_EMBED_URL and _CODE_EMBED_MODEL)
 
 
+def _can_embed_queries() -> bool:
+    """Can a QUERY be embedded right now, by ANY lane that exists?
+
+    Three lanes: the in-process EmbeddingEngine, a local vLLM, and the
+    code-specialized service (`AITHER_CODEGRAPH_EMBED_URL`). The code-service
+    lane came last and the guards below kept asking about the first two only --
+    measured 2026-09-10: a 402k-chunk index fully embedded by the distilled
+    student, `AITHER_CODEGRAPH_EMBED_URL` set, and `awgraph query` still
+    answered KEYWORD-ONLY, because `semantic_query()` returned [] on a guard
+    that did not know the lane existed. The degradation is silent by design
+    (keyword results still look plausible), so nothing in the output says the
+    index was never consulted -- the answer is just quietly worse.
+    """
+    return bool(_HAS_EMBEDDING_ENGINE or _detect_vllm() or _code_embed_enabled())
+
+
 async def _embed_via_code_service(
     texts: List[str], is_query: bool
 ) -> List[Optional[list]]:
@@ -2950,7 +2966,7 @@ class CodeGraph(BaseFacultyGraph):
         Returns:
             Stats dict with total, cached, new, failed, embed_ms
         """
-        if not _HAS_EMBEDDING_ENGINE and not _detect_vllm():
+        if not _can_embed_queries():
             raise RuntimeError("No embedding backend available (need EmbeddingEngine or vLLM)")
 
         if cache_path is None:
@@ -2982,11 +2998,21 @@ class CodeGraph(BaseFacultyGraph):
                 except Exception as e:
                     logger.warning(f"Failed to load embedding cache: {e}")
 
+        # A LIVE service reconciles this graph on its own schedule (a watcher
+        # re-indexes), so iterating the live dict ends in "dictionary changed
+        # size during iteration" mid-pass -- measured 2026-09-11 inside
+        # aither-cognition-advanced, whose pass died at exactly this loop while
+        # its service re-indexed. Snapshot ONCE and use it for the rest of the
+        # pass: the pass embeds the chunks that existed when it started, and a
+        # reconcile that lands meanwhile is picked up by the next one
+        # (force=False is incremental by design).
+        _chunk_items = list(self.chunks.items())
+
         # Apply cached embeddings to current chunks — compacted to float32 rows
         # on the way in, and the compact row is shared back into `cached` so the
         # checkpoint pickle sheds the boxed float64 lists too.
         applied = 0
-        for chunk_id, chunk in self.chunks.items():
+        for chunk_id, chunk in _chunk_items:
             if chunk_id in cached and chunk.embedding is None:
                 chunk.embedding = _as_f32(cached[chunk_id])
                 cached[chunk_id] = chunk.embedding
@@ -3024,12 +3050,12 @@ class CodeGraph(BaseFacultyGraph):
         # force actually forces; an interruption then leaves coderank+None (a
         # coherent partial), never coderank+nomic.
         if force:
-            for _c in self.chunks.values():
+            for _, _c in _chunk_items:
                 _c.embedding = None
 
         # Find chunks needing embeddings
         need_embedding = [
-            (cid, chunk) for cid, chunk in self.chunks.items()
+            (cid, chunk) for cid, chunk in _chunk_items
             if chunk.embedding is None
         ]
 
@@ -3290,7 +3316,7 @@ class CodeGraph(BaseFacultyGraph):
         Returns list of (similarity_score, chunk) sorted descending.
         Requires embed_chunks() to have been called first.
         """
-        if not _HAS_EMBEDDING_ENGINE and not _detect_vllm():
+        if not _can_embed_queries():
             return []
 
         # Presence check only — do NOT materialize a list over every chunk here.
@@ -3770,7 +3796,7 @@ class CodeGraph(BaseFacultyGraph):
         Embeds the query once, computes cosine sim against each candidate's
         existing embedding. Falls back to original order for un-embedded chunks.
         """
-        if not _HAS_EMBEDDING_ENGINE and not _detect_vllm():
+        if not _can_embed_queries():
             return chunks[:top_k]
 
         # Embed the query via EmbeddingEngine
@@ -3828,7 +3854,7 @@ class CodeGraph(BaseFacultyGraph):
         Splits candidates into groups of `group_size`, scores each group in
         parallel via asyncio.gather. ~4x faster than sequential for 20 candidates.
         """
-        if (not _HAS_EMBEDDING_ENGINE and not _detect_vllm()) or len(chunks) <= top_k:
+        if not _can_embed_queries() or len(chunks) <= top_k:
             return chunks[:top_k]
 
         candidates = chunks[:20]  # Cap at 20
@@ -4039,7 +4065,20 @@ class CodeGraph(BaseFacultyGraph):
             self._has_embeddings_cached = any(
                 c.embedding is not None for c in self.chunks.values()
             )
-        if not self._has_embeddings_cached or not _HAS_EMBEDDING_ENGINE:
+        if not self._has_embeddings_cached or not _can_embed_queries():
+            if self._has_embeddings_cached and not _can_embed_queries():
+                # The quadrants are NOT the same finding. Embedded chunks and no
+                # way to embed the QUERY is the silently-degraded case: ten
+                # plausible keyword hits come back and nothing says the index was
+                # never consulted. Measured 2026-09-10 -- a session ran the whole
+                # ground-truth set this way. Say it out loud.
+                logger.warning(
+                    "[HYBRID] %d chunks carry embeddings but NO query lane is "
+                    "available (set AITHER_CODEGRAPH_EMBED_URL, or run where an "
+                    "EmbeddingEngine/vLLM answers) -- answering KEYWORD-ONLY. "
+                    "The results look plausible; the index was not consulted.",
+                    len(self.chunks),
+                )
             return keyword_results[:max_results]
 
         # Run semantic search.
