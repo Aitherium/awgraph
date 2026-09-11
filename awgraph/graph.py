@@ -1011,6 +1011,25 @@ def _extract_module(
 
 _MODULE_TABLE_MIN_CHARS = 600    # below this the module-chunk preview still holds it
 _MODULE_TABLE_CHARS = 4000       # the table's own preview budget
+_RE_TABLE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]{2,39}$")
+
+
+def _table_keys(value: ast.AST, limit: int = 16) -> List[str]:
+    """Identifier-shaped string literals inside a table value, in walk order.
+
+    A registry's entries are keyed by exactly this shape (`"volunteer_batch_embed"`,
+    `"sprite_care"`) while its prose titles are not, so the filter is what keeps
+    the signal high: the first 16 identifiers, not the first 16 strings.
+    """
+    keys: List[str] = []
+    for node in ast.walk(value):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            s = node.value
+            if _RE_TABLE_KEY.match(s) and s not in keys:
+                keys.append(s)
+                if len(keys) >= limit:
+                    break
+    return keys
 
 
 def _extract_module_table(node: ast.stmt, source_path: str) -> Optional[CodeChunk]:
@@ -1025,6 +1044,13 @@ def _extract_module_table(node: ast.stmt, source_path: str) -> Optional[CodeChun
     mis-ranked, it was unindexed. A value whose rendered form exceeds
     `_MODULE_TABLE_MIN_CHARS` is a table by measurement (it is already being
     truncated away), so it earns its own chunk.
+
+    The chunk's KEYS go first, in the signature and at the head of the preview,
+    because that is the only text the embedder sees: `embed_chunks` builds its
+    input from signature + body_preview[:300] (graph.py), so a 2,000-char
+    rendered value carries nothing searchable within the window the vectors are
+    built from. Measured 2026-09-11: without the keys line the table chunk
+    still ranked outside the semantic top-30 for the question it answers.
 
     Returns None for scalars, short values and dunder scaffolding, so no empty
     or duplicate chunks are added for the thousands of `X = 1` constants.
@@ -1049,9 +1075,12 @@ def _extract_module_table(node: ast.stmt, source_path: str) -> Optional[CodeChun
     name = targets[0]
     if name.startswith("__"):
         return None
+    keys = _table_keys(value)
+    key_line = f"keys: {', '.join(keys)}" if keys else ""
     start_line = node.lineno
     end_line = node.end_lineno or start_line
     digest = hashlib.sha256(source_path.encode()).hexdigest()[:8]
+    body = "\n".join(p for p in (key_line, rendered[:_MODULE_TABLE_CHARS]) if p)
     return CodeChunk(
         id=f"module_{name}_{digest}",
         name=name,
@@ -1059,8 +1088,9 @@ def _extract_module_table(node: ast.stmt, source_path: str) -> Optional[CodeChun
         source_path=source_path,
         start_line=start_line,
         end_line=end_line,
-        signature=f"{name} (module-level table)",
-        body_preview=rendered[:_MODULE_TABLE_CHARS],
+        signature=(f"{name} (module-level table) keys: {', '.join(keys)}"
+                   if keys else f"{name} (module-level table)"),
+        body_preview=body,
         line_count=end_line - start_line + 1,
     )
 

@@ -19,8 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `_MODULE_TABLE_MIN_CHARS` (600) now become their own `CodeChunk` (preview budget
   4000), named after the assignment target; scalars and dunders are unchanged, so the
   thousands of `X = 1` constants still add nothing.
-  Guarded by `tests/test_module_tables.py`, which pins both halves (the old module
-  preview does NOT carry the tail; the table chunk does).
+- A table chunk carries its KEYS first, in the signature and at the head of the
+  preview. `embed_chunks` builds its input from `signature + body_preview[:300]`, so a
+  2,000-char rendered dict contributes nothing searchable to the vector: the first cut
+  of the table chunk (content only) still ranked outside the semantic top-30 for the
+  question it answers. Keys are identifier-shaped string literals (`volunteer_batch_embed`,
+  `sprite_care` — not prose titles), up to 16, in walk order. Predicted against the live
+  386k-chunk matrix: the same question's rank for the chunk goes from outside the top-30
+  to **rank 8**.
+  Guarded by `tests/test_module_tables.py`, which pins all of it: the old module
+  preview does NOT carry the tail; the table chunk does; and the registry key lands
+  inside the 300-char window the embedder actually reads (with a fixture shaped like
+  `EARN_SOURCES`, key placed past that window, so the test fails if the keys line is
+  removed).
 
 ## [1.4.6] - 2026-09-10
 

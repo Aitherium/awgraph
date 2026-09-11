@@ -52,3 +52,33 @@ def test_a_scalar_constant_gets_no_table_chunk():
     assert "PORT" not in names and "TIMEOUT" not in names, (
         "a scalar must not earn its own chunk -- thousands of `X = 1` lines "
         "would dilute every ranking")
+
+
+# The real shape: a dict comprehension over calls whose FIRST argument is the
+# registry key (EarnLedger's EARN_SOURCES). The key of interest is last, so its
+# literal sits ~900 chars into the unparsed value -- outside the 300-char window
+# embed_chunks actually embeds.
+EARN_SHAPE = (
+    "EARN_SOURCES = {\n    s.id: s\n    for s in [\n"
+    + "".join(
+        f'        EarnSource("source_{i}", "Title number {i}", '
+        f'"A longer description of what entry {i} rewards.", base_award={i}),\n'
+        for i in range(9)
+    )
+    + '        EarnSource("volunteer_batch_embed", "Embedded a verified batch", '
+      '"A batch agreed with an independent peer.", base_award=10),\n'
+    + "    ]\n}\n"
+)
+
+
+def test_table_keys_land_in_the_window_the_embedder_actually_reads():
+    fg = _parse(EARN_SHAPE + "\n\ndef helper():\n    return 1\n")
+    table = next(c for c in fg.chunks if c.name == "EARN_SOURCES")
+    rendered = (table.body_preview or "").split("\n", 1)[-1]
+    assert "volunteer_batch_embed" not in rendered[:300], (
+        "fixture drifted: the key is now visible in the raw window, so this "
+        "test no longer proves the keys line is doing the work")
+    window = (table.signature or "") + "\n" + (table.body_preview or "")[:300]
+    assert "volunteer_batch_embed" in window, (
+        "embed_chunks builds its text from signature + body_preview[:300]; a "
+        "registry key outside that window is invisible to the vector")
