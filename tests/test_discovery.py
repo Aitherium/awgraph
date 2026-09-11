@@ -139,3 +139,27 @@ def test_default_exclude_list_is_split_generic_from_local():
     # Nothing project-specific may sit in the generic set.
     assert not (generic & set(EXTRA_EXCLUDE_DIRS))
     assert set(default_exclude_dirs()) == generic | set(EXTRA_EXCLUDE_DIRS)
+
+
+@requires_rg
+def test_files_under_dot_directories_are_discovered(tmp_path):
+    """A dot-directory is a hidden FOLDER, not hidden code.
+
+    Guards the miss measured 2026-09-10: ripgrep AND fd both skip
+    dot-directories by default, so `.DEPLOYMENT/`, `.github/` and `.claude/`
+    were absent from a 308,751-chunk index -- discovery returned 21,510 files
+    and ZERO under any dot-directory, while the parse, the embed pass and every
+    query were green. Two of six known questions in the host repo are answered
+    by files in `.DEPLOYMENT/scripts/`, so they could never hit, whatever the
+    embedder scored. The exclude list, not the hidden-file default, is what
+    must keep `.git` out -- so `.git` is asserted too, in the same tree.
+    """
+    root = _tree(tmp_path)
+    (root / ".DEPLOYMENT/scripts").mkdir(parents=True)
+    (root / ".DEPLOYMENT/scripts/deploy.sh").write_text("#!/bin/sh\nset -e\n", encoding="utf-8")
+    (root / ".git").mkdir(exist_ok=True)
+    (root / ".git/hook.py").write_text("x = 1\n", encoding="utf-8")
+
+    found = _discover(root)
+    assert "deploy.sh" in found, f"a file under a dot-directory was not discovered: {found}"
+    assert "hook.py" not in found, f".git leaked into discovery: {found}"

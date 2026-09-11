@@ -749,13 +749,26 @@ def _parse_non_python(file_path: str, content: str, lines: List[str],
 
     if multilang.is_document(file_path):
         entries = multilang.chunk_document(content, file_path)
+        is_doc = True
     else:
         entries = multilang.parse_symbols(content.encode("utf-8", "ignore"), file_path)
+        is_doc = False
+        if not entries and len(content) <= SYMBOLLESS_FALLBACK_MAX_BYTES:
+            # A symbol-bearing language that yields ZERO symbols -- a straight-line
+            # shell script, a data-ish .js -- used to vanish: discovery found it,
+            # the parse succeeded, `entries` was empty, and the file contributed
+            # nothing, so no query could ever match it however good the embedder.
+            # Measured 2026-09-10 on the host repo: 2 of 6 known questions are
+            # answered by exactly such scripts (.DEPLOYMENT/scripts/*.sh, both
+            # function-less). Fall back to the document chunker so every
+            # discovered file is at least one chunk. Size-bounded: a minified
+            # vendor bundle would otherwise explode into hundreds of windows.
+            entries = multilang.chunk_document(content, file_path)
+            is_doc = bool(entries)
 
     if not entries:
         return
 
-    is_doc = multilang.is_document(file_path)
     for entry in entries:
         start_line = max(1, int(entry.get("start_line") or 1))
         end_line = max(start_line, int(entry.get("end_line") or start_line))
@@ -1070,6 +1083,13 @@ def _extract_method(node: ast.FunctionDef | ast.AsyncFunctionDef, lines: List[st
 # Persist the embedding cache every N batches. The end-of-run-only save meant
 # any failure lost the entire run (measured: died at ~6min having reached 62%
 # coverage, next attempt restarted from 0). Env-tunable; 0 disables.
+#: A symbol-bearing file that parses to ZERO symbols (a straight-line shell
+#: script, a data-ish .js) falls back to the document chunker so it is at least
+#: one retrievable chunk -- but only under this size. Above it, the file is
+#: almost certainly generated/minified, where windowing produces hundreds of
+#: near-duplicate chunks and pollutes the index it was meant to help.
+SYMBOLLESS_FALLBACK_MAX_BYTES = 64 * 1024
+
 _CHECKPOINT_EVERY = int(os.getenv("AITHER_CODEGRAPH_EMBED_CHECKPOINT_BATCHES", "50"))
 
 # LRU cap for lazy-loaded chunk body cache (in-memory full source text).
@@ -1226,7 +1246,7 @@ async def _discover(root: Path, exts, excludes) -> Tuple[List[Path], float]:
     try:
         result = await asyncio.create_subprocess_exec(
             "fd", ".", str(root),
-            *_fd_ext_args(exts), "--type", "f",
+            *_fd_ext_args(exts), "--type", "f", "--hidden",
             *_fd_exclude_args(excludes),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1253,7 +1273,16 @@ async def _discover(root: Path, exts, excludes) -> Tuple[List[Path], float]:
             # .gitignore: every ignored build artifact and vendored tree was
             # indexed as source, and nothing said so because the files exist.
             # Negated globs below are fine; extensions are filtered in Python.
-            "rg", "--files",
+            # --hidden: ripgrep and fd BOTH skip dot-directories by default, so
+            # `.DEPLOYMENT/`, `.github/` and `.claude/` were invisible to the
+            # index -- measured 2026-09-10: discovery returned 21,510 files and
+            # ZERO under any dot-directory, so a question whose answer is a
+            # deploy script could never hit, however good the embedder (2 of 6
+            # known questions in this repo are answered by files in
+            # `.DEPLOYMENT/scripts/`). The exclude list still drops .git, .venv,
+            # .worktrees and friends, so this widens discovery to source that is
+            # hidden, not to state.
+            "rg", "--files", "--hidden",
             *_rg_exclude_args(excludes),
             str(root),
             stdout=asyncio.subprocess.PIPE,

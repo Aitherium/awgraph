@@ -5,6 +5,18 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.6] - 2026-09-10
+
+### Fixed
+
+- Discovery now passes `--hidden` / `--hidden` (fd) so files under dot-directories
+  (`.DEPLOYMENT/`, `.github/`, `.claude/`, …) are indexed. Ripgrep and fd both skip
+  dot-directories by default, so on the host repo discovery returned 21,510 files and
+  ZERO under any dot-directory: a question whose answer is a deploy script could never
+  hit, whatever the embedder scored. The exclude list still drops `.git`, `.venv`,
+  `.worktrees` and friends. Measured on the host repo: 21,510 → 27,757 discovered files.
+  Guarded by `tests/test_discovery.py::test_files_under_dot_directories_are_discovered`.
+
 ## [1.4.5] - 2026-09-07
 
 ### Fixed
