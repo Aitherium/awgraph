@@ -875,6 +875,21 @@ def parse_file_sync(file_path: str, content: Optional[str] = None) -> FileGraph:
         if module_chunk is not None:
             graph.chunks.append(module_chunk)
 
+        # Module-level TABLES get their own chunk. The module chunk above renders
+        # each constant through ast.unparse and truncates it to 120 chars, which
+        # is enough for `PORT = 8194` and useless for a data table: measured
+        # 2026-09-11, "volunteer_batch_embed" lives at EarnLedger.py:132 inside
+        # EARN_SOURCES (a ~107-line dict), the module chunk carried only the
+        # table's first 120 unparsed chars, and NO chunk's text contained the
+        # literal — so the question "where is the earn source for volunteer
+        # batch embedding defined?" was unanswerable by ANY ranking, at every
+        # weight and in every rerank mode. Registries, level tables and config
+        # maps are exactly this shape.
+        for node in ast.iter_child_nodes(tree):
+            table = _extract_module_table(node, file_path)
+            if table is not None:
+                graph.chunks.append(table)
+
         # First pass: extract all functions and classes
         class_methods: Dict[str, List[str]] = defaultdict(list)  # class_name -> [method_names]
 
@@ -991,6 +1006,62 @@ def _extract_module(
         docstring=docstring or "",
         body_preview=body,
         line_count=len(consts),
+    )
+
+
+_MODULE_TABLE_MIN_CHARS = 600    # below this the module-chunk preview still holds it
+_MODULE_TABLE_CHARS = 4000       # the table's own preview budget
+
+
+def _extract_module_table(node: ast.stmt, source_path: str) -> Optional[CodeChunk]:
+    """One searchable chunk for a module-level DATA TABLE (a long dict/list/map).
+
+    `_extract_module` already carries every top-level constant, but only as
+    name + the first 120 unparsed chars of the value. That is the right budget
+    for scalars and precisely wrong for a registry: measured 2026-09-11, the
+    earn-source entry `volunteer_batch_embed` (EarnLedger.py:132) sat ~2,000
+    chars into EARN_SOURCES and appeared in NO chunk's text, so every query
+    about it returned ten confident wrong results -- the answer was not
+    mis-ranked, it was unindexed. A value whose rendered form exceeds
+    `_MODULE_TABLE_MIN_CHARS` is a table by measurement (it is already being
+    truncated away), so it earns its own chunk.
+
+    Returns None for scalars, short values and dunder scaffolding, so no empty
+    or duplicate chunks are added for the thousands of `X = 1` constants.
+    """
+    if isinstance(node, ast.Assign):
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        value = node.value
+    elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        targets = [node.target.id]
+        value = node.value
+    else:
+        return None
+    if not targets or value is None:
+        return None
+    try:
+        rendered = ast.unparse(value)
+    except Exception:
+        return None
+    if len(rendered) < _MODULE_TABLE_MIN_CHARS:
+        return None
+
+    name = targets[0]
+    if name.startswith("__"):
+        return None
+    start_line = node.lineno
+    end_line = node.end_lineno or start_line
+    digest = hashlib.sha256(source_path.encode()).hexdigest()[:8]
+    return CodeChunk(
+        id=f"module_{name}_{digest}",
+        name=name,
+        chunk_type=ChunkType.MODULE,
+        source_path=source_path,
+        start_line=start_line,
+        end_line=end_line,
+        signature=f"{name} (module-level table)",
+        body_preview=rendered[:_MODULE_TABLE_CHARS],
+        line_count=end_line - start_line + 1,
     )
 
 

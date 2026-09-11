@@ -5,6 +5,23 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.7] - 2026-09-11
+
+### Fixed
+
+- A module-level DATA TABLE now gets its own chunk. `_extract_module` carries every
+  top-level constant, but each value is `ast.unparse`d and truncated to 120 chars —
+  right for `PORT = 8194`, useless for a registry. Measured on the host index:
+  `volunteer_batch_embed` lives at `EarnLedger.py:132` inside `EARN_SOURCES` (a
+  ~101-line dict), appeared in NO chunk's text, and the question about it returned ten
+  confident wrong results at every fusion weight and in every rerank mode — the answer
+  was unindexed, not mis-ranked. Values whose rendered form exceeds
+  `_MODULE_TABLE_MIN_CHARS` (600) now become their own `CodeChunk` (preview budget
+  4000), named after the assignment target; scalars and dunders are unchanged, so the
+  thousands of `X = 1` constants still add nothing.
+  Guarded by `tests/test_module_tables.py`, which pins both halves (the old module
+  preview does NOT carry the tail; the table chunk does).
+
 ## [1.4.6] - 2026-09-10
 
 ### Fixed
