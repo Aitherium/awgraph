@@ -45,12 +45,18 @@ def _rel(path: str, root: str) -> str:
         return path
 
 
-async def _open_graph(root: str, build: bool):
+async def _open_graph(root: str, build: bool, hydrate: bool = True):
     """Return ``(graph, usable)`` for ``root``.
 
     ``build`` distinguishes ``index`` (parse the tree) from every read command
     (load the persisted cache). A read that silently re-indexed would turn a
     missing index into a multi-minute pause that looks like a hang.
+
+    ``hydrate`` attaches persisted embedding vectors. It is on by default
+    because ``query`` and ``stats`` both need them, and off for the edge
+    commands, which touch no vector at all: measured on a 387k-chunk index the
+    hydrate step alone costs 34.7 s, in front of a symbol lookup that takes
+    0.2 s.
     """
     from awgraph.graph import CodeGraph, _hydrate_embeddings, _load_chunk_cache
 
@@ -59,7 +65,7 @@ async def _open_graph(root: str, build: bool):
         await graph.index_codebase(root)
         return graph, True
     loaded = _load_chunk_cache(graph, root)
-    if loaded and graph.chunks:
+    if loaded and graph.chunks and hydrate:
         # The embedding pass persists vectors in a separate cache; without this
         # every read command was keyword-only and `stats` reported 0% forever.
         _hydrate_embeddings(graph)
@@ -129,11 +135,56 @@ async def cmd_query(args: argparse.Namespace) -> int:
     return _print_rows([_chunk_row(c, root) for c in chunks], args.json)
 
 
+def _answer_from_store(symstore, side: str, args: argparse.Namespace,
+                       direction: str, root: str) -> int:
+    """Print an edge answer that came from the sidecar.
+
+    A caller list that hit the store's ceiling says so on stderr, because a
+    truncated list printed as-is is indistinguishable from a complete one —
+    and the symbols that hit the ceiling are precisely the ones somebody is
+    trying to understand the blast radius of.
+    """
+    answer = symstore.lookup(side, args.symbol, direction, root)
+    if answer is None:
+        print("no symbol named " + repr(args.symbol) + " in the index")
+        return EXIT_EMPTY
+    rows, total = answer
+    if total > len(rows):
+        print("awgraph: showing {0} of {1} {2} — the rest were not stored "
+              "(see MAX_STORED_EDGES)".format(len(rows), total, direction),
+              file=sys.stderr)
+    return _print_rows(rows, args.json)
+
+
 async def _edges(args: argparse.Namespace, direction: str) -> int:
+    """Answer ``callers`` / ``calls``, from the sidecar store when it is current.
+
+    The sidecar is a projection of the chunk cache holding only symbols and
+    edges, so this path never deserialises bodies or vectors. When it is
+    missing or was built from an older cache it is rebuilt here — once — from
+    the chunk cache this command had to load anyway.
+    """
+    from awgraph import symbols as symstore
+    from awgraph.graph import _get_data_path
+
     root = os.path.abspath(args.path)
-    graph, ok = await _open_graph(root, build=False)
+    chunk_cache = _get_data_path(root, "codegraph_chunks.pkl")
+    side = symstore.store_path(root)
+
+    if symstore.is_fresh(side, chunk_cache):
+        return _answer_from_store(symstore, side, args, direction, root)
+
+    graph, ok = await _open_graph(root, build=False, hydrate=False)
     if not ok:
         return _fail("no index for " + root + " — run: awgraph index " + args.path)
+    if os.path.exists(chunk_cache):
+        try:
+            symstore.build(graph.chunks.values(), side, derived_from=chunk_cache)
+        except Exception as exc:  # noqa: BLE001 - a cold answer beats a crash
+            print("awgraph: could not write the symbol store (" + str(exc)
+                  + ") — answering from the chunk cache", file=sys.stderr)
+        else:
+            return _answer_from_store(symstore, side, args, direction, root)
 
     matches = [c for c in graph.chunks.values()
                if getattr(c, "name", "") == args.symbol]

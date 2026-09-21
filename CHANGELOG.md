@@ -5,6 +5,46 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.11] - 2026-09-21
+
+### Added
+
+- **Call edges for the JavaScript/TypeScript family** (`awgraph/jscalls.py`).
+  `.js/.jsx/.mjs/.cjs/.ts/.tsx/.mts/.cts` bodies are scanned for calls after
+  comments, string literals and regex literals are blanked out; `${ ... }`
+  substitutions inside template literals are treated as code, because they are.
+  A definition is never reported as its own caller, and a name that is only
+  *mentioned* — in a comment, a message, a regex — never becomes an edge.
+  Resolution binds same-file always, and cross-file only when the name is at
+  least 3 characters and answers to no more than 12 definitions; anything else
+  is reported as an unresolved call rather than guessed at.
+
+  Before this, `callers` on a TypeScript symbol returned a confident negative
+  on an index that held both the symbol and every one of its call sites.
+
+- **A symbol/edge sidecar store** (`awgraph/symbols.py`), written beside the
+  chunk cache by `index` and rebuilt automatically whenever the cache it was
+  derived from changes. `callers` and `calls` answer from it and touch no
+  vectors at all. Measured on a 387,098-chunk index: **28–48 s → 0.9–1.2 s**.
+  Edge lists are capped per symbol, and a capped answer SAYS it was capped —
+  the true count is stored beside the list.
+
+### Changed
+
+- `callers`/`calls` no longer hydrate the embedding cache. On the index above
+  that step alone was 34.7 s, in front of a 0.2 s symbol lookup, and no part of
+  an edge question reads a vector. `query` and `stats` still hydrate.
+- Call edges no longer resolve across language families. A Python function
+  calling `render()` used to attach itself as a caller of every `.ts` component
+  and every documentation section titled `render`.
+- `hybrid_query` collapses results with byte-identical bodies, **before**
+  taking the top N, so a file that exists in four copies frees three slots for
+  different answers instead of spending four of ten saying one thing. Measured
+  on the same index: 71,257 chunks (18%) sit in 29,168 identical-body groups.
+- The MCP tools `code_callers`/`code_calls` now share one implementation with
+  the CLI (`mcp_server.resolve_edges`), so an agent and a terminal cannot get
+  different answers to the same question.
+
 ## [1.4.8] - 2026-09-11
 
 ### Fixed

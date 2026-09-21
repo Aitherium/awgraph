@@ -90,6 +90,88 @@ def _fmt(chunks: list, root: str) -> str:
     }) for c in chunks)
 
 
+async def resolve_edges(symbol: str, path: str, edge: str) -> str:
+    """Answer a callers/calls question for the MCP tools.
+
+    Module level, not nested inside ``build_server``, for two reasons: it is
+    the half of this file that can be tested without the ``mcp`` package
+    installed, and it is the half that must stay in step with the CLI. Both
+    surfaces read the same sidecar store, so an agent and a terminal never get
+    different answers to the same question.
+    """
+    from awgraph import symbols as symstore
+    from awgraph.graph import _get_data_path
+
+    root = os.path.abspath(path)
+    chunk_cache = _get_data_path(root, "codegraph_chunks.pkl")
+    side = symstore.store_path(root)
+    direction = "callers" if edge == "called_by" else "calls"
+
+    if not symstore.is_fresh(side, chunk_cache):
+        graph, ok = await _open(root, build=False)
+        if not ok:
+            return _no_index(root)
+        if os.path.exists(chunk_cache):
+            try:
+                symstore.build(graph.chunks.values(), side, derived_from=chunk_cache)
+            except Exception:  # noqa: BLE001 - fall back to the in-memory graph
+                return _edges_from_graph(graph, symbol, edge, root)
+        else:
+            return _edges_from_graph(graph, symbol, edge, root)
+
+    answer = symstore.lookup(side, symbol, direction, root)
+    if answer is None:
+        return (f"No symbol named {symbol!r} in the index. It may be defined "
+                "outside this repository, or the index may predate it.")
+    rows, total = answer
+    resolved = [r for r in rows if r.get("type") != "external"]
+    external = [r["name"] for r in rows if r.get("type") == "external"]
+    if not resolved and not external:
+        return ("No matches. The index exists, so this is a real negative answer "
+                "rather than a missing index.")
+    text = "\n".join(json.dumps({
+        "name": r["name"],
+        "type": r["type"],
+        "file": r["path"],
+        "line": r["line"],
+        "signature": (r["signature"] or "").strip()[:300],
+    }) for r in resolved) or "No resolvable edges inside this repository."
+    if external:
+        text += ("\n\nOutside this repository (stdlib or third party): "
+                 + ", ".join(external[:25]))
+    if total > len(rows):
+        text += (f"\n\nShowing {len(rows)} of {total} {direction}; the rest were "
+                 "not stored. Treat this as a fan-out too large to enumerate, "
+                 "not as the complete list.")
+    return text
+
+
+def _edges_from_graph(graph, symbol: str, edge: str, root: str) -> str:
+    """The pre-sidecar path, kept for when the store cannot be written."""
+    matches = [c for c in graph.chunks.values()
+               if getattr(c, "name", "") == symbol
+               or str(getattr(c, "name", "")).split(".")[-1] == symbol]
+    if not matches:
+        return (f"No symbol named {symbol!r} in the index. It may be defined "
+                "outside this repository, or the index may predate it.")
+    names: list = []
+    seen = set()
+    for c in matches:
+        for nm in getattr(c, edge, []) or []:
+            if nm not in seen:
+                seen.add(nm)
+                names.append(nm)
+    by_name = {getattr(c, "name", ""): c for c in graph.chunks.values()}
+    text = _fmt([by_name[n] for n in names if n in by_name], root)
+    external = [n for n in names if n not in by_name]
+    if external:
+        # Reported rather than dropped: showing only resolvable edges
+        # understates the fan-out and hides third-party coupling.
+        text += ("\n\nOutside this repository (stdlib or third party): "
+                 + ", ".join(external[:25]))
+    return text
+
+
 def _no_index(root: str) -> str:
     return (f"No index for {root}. Run the `code_index` tool on this path first "
             "(one-time per repository; cached on disk outside the repo). Not "
@@ -165,32 +247,7 @@ def build_server():
         return _fmt(await graph.hybrid_query(query, max_results=limit), root)
 
     async def _edges(symbol: str, path: str, edge: str) -> str:
-        root = os.path.abspath(path)
-        graph, ok = await _open(root, build=False)
-        if not ok:
-            return _no_index(root)
-        matches = [c for c in graph.chunks.values()
-                   if getattr(c, "name", "") == symbol
-                   or str(getattr(c, "name", "")).split(".")[-1] == symbol]
-        if not matches:
-            return (f"No symbol named {symbol!r} in the index. It may be defined "
-                    "outside this repository, or the index may predate it.")
-        names: list = []
-        seen = set()
-        for c in matches:
-            for nm in getattr(c, edge, []) or []:
-                if nm not in seen:
-                    seen.add(nm)
-                    names.append(nm)
-        by_name = {getattr(c, "name", ""): c for c in graph.chunks.values()}
-        text = _fmt([by_name[n] for n in names if n in by_name], root)
-        external = [n for n in names if n not in by_name]
-        if external:
-            # Reported rather than dropped: showing only resolvable edges
-            # understates the fan-out and hides third-party coupling.
-            text += ("\n\nOutside this repository (stdlib or third party): "
-                     + ", ".join(external[:25]))
-        return text
+        return await resolve_edges(symbol, path, edge)
 
     @server.tool(name="code_callers", description="What calls this symbol.")
     async def code_callers(symbol: str, path: str) -> str:

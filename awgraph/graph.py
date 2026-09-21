@@ -56,6 +56,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from awgraph import jscalls as _jscalls
 from awgraph import plugins as _plugins
 from awgraph.base import BaseFacultyGraph, GraphSyncConfig
 from awgraph.degradation import SubsystemTier
@@ -746,12 +747,18 @@ def _parse_non_python(file_path: str, content: str, lines: List[str],
                       graph: "FileGraph") -> None:
     """Fill `graph` from a non-Python file: repowise symbols, or doc sections.
 
-    Kept deliberately narrow. It does NOT try to build call edges: repowise
-    gives symbol spans, not a resolved call graph, and inventing edges from
-    name collisions across 40 languages would produce confident wrong
-    relationships — worse than none, because the retrieval layer trusts them.
-    Non-Python chunks are therefore retrievable (keyword + semantic) but carry
-    no `calls`/`called_by`, which is honest about what was actually parsed.
+    The symbol adapter gives spans, not a resolved call graph, and inventing
+    edges from name collisions across 40 languages would produce confident
+    wrong relationships — worse than none, because the retrieval layer trusts
+    them. So most non-Python chunks are retrievable (keyword + semantic) and
+    carry no `calls`/`called_by`, which is honest about what was parsed.
+
+    The JavaScript/TypeScript family is the exception, and it is carved out
+    rather than generalised: `jscalls` reads those bodies directly, after
+    removing comments, strings and regex literals, and the resulting names are
+    resolved only within the same language family (see `_backfill_called_by`).
+    Without it, `callers` on a `.ts` symbol returned "no matches" on an index
+    that held the symbol and every one of its call sites.
     """
     from awgraph import multilang  # noqa: PLC0415 - optional dependency
 
@@ -795,6 +802,9 @@ def _parse_non_python(file_path: str, content: str, lines: List[str],
         # Hash the repowise symbol id, not the body: the id survives a move, so
         # a chunk keeps its identity when code above it shifts.
         ident = str(entry.get("symbol_id") or f"{file_path}::{name}")
+        calls: List[str] = []
+        if not is_doc and _jscalls.is_js_source(file_path):
+            calls = _jscalls.extract_calls(body, name)
         graph.chunks.append(CodeChunk(
             id=f"{kind}_{hashlib.sha256(ident.encode()).hexdigest()[:12]}",
             name=name,
@@ -805,6 +815,7 @@ def _parse_non_python(file_path: str, content: str, lines: List[str],
             signature=f"{lang} {kind} {name}".strip(),
             docstring="",
             body_preview=body,
+            calls=calls,
             line_count=end_line - start_line + 1,
         ))
 
@@ -1023,6 +1034,43 @@ _RE_TABLE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]{2,39}$")
 _EMBED_PREVIEW_HEAD = 180
 _EMBED_PREVIEW_TAIL = 110
 _EMBED_PREVIEW_HEADTAIL_MIN = 600
+
+
+#: Bodies shorter than this are never collapsed as duplicates. A one-line
+#: `export default x` or a two-line stub legitimately recurs across unrelated
+#: files; collapsing those would hide real, distinct answers behind whichever
+#: copy happened to rank first.
+DUPLICATE_MIN_BODY = 80
+
+
+def _collapse_duplicate_bodies(chunks: List["CodeChunk"]) -> List["CodeChunk"]:
+    """Keep one result per distinct body, preserving rank order.
+
+    A file that exists in several places — a vendored copy, a mirrored tree, a
+    template instantiated per tenant — produces chunks that are byte identical
+    and therefore score identically, so they arrive adjacent and take four of
+    the ten slots that were supposed to show four different answers. Measured
+    on a 387k-chunk index: 71,257 chunks (18%) sit inside 29,168
+    identical-body groups, and one question returned the same documentation
+    section four times, from four copies of the same file.
+
+    Identity is the body, not the path: two files with the same content ARE the
+    same answer. The copy kept is the highest-ranked one, which is the copy the
+    scorer already preferred.
+    """
+    seen: Set[str] = set()
+    out: List["CodeChunk"] = []
+    for chunk in chunks:
+        body = (getattr(chunk, "body_preview", "") or "").strip()
+        if len(body) < DUPLICATE_MIN_BODY:
+            out.append(chunk)
+            continue
+        digest = hashlib.sha256(body.encode("utf-8", "ignore")).hexdigest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        out.append(chunk)
+    return out
 
 
 def _embed_text_for_chunk(chunk: "CodeChunk") -> str:
@@ -1994,11 +2042,32 @@ class CodeGraph(BaseFacultyGraph):
             p = p[:-9]
         return p.replace("/", ".")
 
+    @staticmethod
+    def _language_family(path: str) -> str:
+        """Which resolution pool a file belongs to: ``py``, ``js`` or ``other``.
+
+        Call edges are matched by NAME, and a name means different things in
+        different languages. Before this guard existed, a Python function
+        calling `render()` attached itself as a caller of every `.ts` component
+        and every markdown section that happened to be titled `render` — on a
+        mixed repository that was thousands of confidently wrong edges, and it
+        was the noise that made the few real non-Python edges unusable.
+        """
+        ext = os.path.splitext(str(path or ""))[1].lower()
+        if ext in (".py", ".pyi"):
+            return "py"
+        if ext in _jscalls.JS_EXTENSIONS:
+            return "js"
+        return "other"
+
     def _backfill_called_by(self):
         """
         Build the called_by relationships by inverting the calls graph.
 
         This is the key step that enables "what calls this function?"
+
+        Resolution stays inside one language family, or inside one file. A
+        cross-language name match is a coincidence, not a call.
         """
         # Build a map of name -> chunk_ids
         name_map: Dict[str, List[str]] = defaultdict(list)
@@ -2024,6 +2093,15 @@ class CodeGraph(BaseFacultyGraph):
 
                 # Find chunks matching this name
                 potential_callees = name_map.get(called_name, [])
+                # JavaScript edges are derived from text, not resolved imports,
+                # so a short or very common name cannot be bound across files
+                # without inventing a fan-out nobody can read. Same-file
+                # resolution below is unaffected.
+                js_unresolvable = (
+                    self._language_family(caller.source_path) == "js"
+                    and (len(called_name) < _jscalls.MIN_CROSS_FILE_NAME
+                         or len(potential_callees) > _jscalls.MAX_DEFINITION_CANDIDATES)
+                )
                 for callee_id in potential_callees:
                     callee = self.chunks[callee_id]
 
@@ -2031,6 +2109,13 @@ class CodeGraph(BaseFacultyGraph):
                     if caller.source_path == callee.source_path:
                         if caller.name not in callee.called_by:
                             callee.called_by.append(caller.name)
+                        continue
+
+                    # Across files, both ends must speak the same language.
+                    if (self._language_family(caller.source_path)
+                            != self._language_family(callee.source_path)):
+                        continue
+                    if js_unresolvable:
                         continue
 
                     # If we expect a specific module origin, enforce it
@@ -4208,7 +4293,7 @@ class CodeGraph(BaseFacultyGraph):
                     "The results look plausible; the index was not consulted.",
                     len(self.chunks),
                 )
-            return keyword_results[:max_results]
+            return _collapse_duplicate_bodies(keyword_results)[:max_results]
 
         # Run semantic search.
         # If query embedding is cached: cosine math only (~1ms) — always succeeds.
@@ -4260,7 +4345,7 @@ class CodeGraph(BaseFacultyGraph):
         if not semantic_results:
             if not cache_hit:
                 self._background_cache_query(query)  # Pre-cache for next call
-            return keyword_results[:max_results]
+            return _collapse_duplicate_bodies(keyword_results)[:max_results]
 
         # Build fused score maps via Reciprocal Rank Fusion (RRF).
         #
@@ -4307,7 +4392,11 @@ class CodeGraph(BaseFacultyGraph):
             combined.append((score, cid))
 
         combined.sort(key=lambda x: -x[0])
-        top_ids = [cid for _, cid in combined[:max_results] if cid in self.chunks]
+        # Collapse identical bodies BEFORE taking the top N, so a file that
+        # exists in four copies frees three slots for different answers rather
+        # than taking four of the ten and returning seven distinct results.
+        _ranked = [self.chunks[cid] for _, cid in combined if cid in self.chunks]
+        top_ids = [c.id for c in _collapse_duplicate_bodies(_ranked)[:max_results]]
         # Build a map of chunk id -> score for later attachment
         score_map = {cid: score for score, cid in combined}
         top_chunks = [self.chunks[cid] for cid in top_ids]
@@ -4347,6 +4436,11 @@ class CodeGraph(BaseFacultyGraph):
                     deduped.append(c)
             top_chunks = deduped[:max_results * 2]
 
+        # Context expansion and chain injection can reintroduce a copy of a
+        # chunk already shown, so the collapse runs again on the widened set —
+        # before re-ranking, which is what trims back to `max_results`.
+        top_chunks = _collapse_duplicate_bodies(top_chunks)
+
         # Re-ranking: explicit mode or auto-apply embedding rerank when
         # expand_context added extra chunks that need to compete for slots
         if rerank:
@@ -4357,6 +4451,7 @@ class CodeGraph(BaseFacultyGraph):
             top_chunks = await self._rerank_by_embedding(query, top_chunks, top_k=max_results)
 
         return top_chunks[:max_results]
+
 
     # ── Full body retrieval ──────────────────────────────────────────────
 
@@ -4863,6 +4958,22 @@ def _save_chunk_cache(cg: "CodeGraph", root_path: str):
         logger.info(f"[CodeGraph] Saved {len(cache['chunks'])} chunks to cache")
     except Exception as e:
         logger.warning(f"[CodeGraph] Failed to save chunk cache: {e}")
+        return
+
+    # The edge sidecar is a projection of what was just written, so it is built
+    # here rather than lazily on the first `callers` call — otherwise exactly
+    # one unlucky user pays for it. Failure is logged and never fatal: the
+    # sidecar is an accelerator, and every reader falls back to this pickle.
+    try:
+        from awgraph import symbols as _symbols  # noqa: PLC0415 - avoids a cycle
+
+        _symbols.build(
+            cg.chunks.values(),
+            _symbols.store_path(root_path),
+            derived_from=cache_path,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[CodeGraph] Failed to build symbol sidecar: {e}")
 
 
 def _embedding_cache_path() -> str:
