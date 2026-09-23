@@ -5,6 +5,17 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.12] - 2026-09-23
+
+### Fixed
+
+- **One over-long chunk no longer drops a whole embed batch.** A served embedder
+  refuses a request whose longest input overflows its per-slot context, and it
+  refuses the whole batch, so every other text in it went unembedded. The
+  code-service lane now bisects a batch refused with 400/413/422 and retries a
+  lone over-long text truncated to `AITHER_CODEGRAPH_EMBED_RETRY_CHARS`
+  (default 400). Transport errors and 5xx are not retried.
+
 ## [1.4.11] - 2026-09-21
 
 ### Added

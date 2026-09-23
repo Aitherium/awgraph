@@ -223,28 +223,55 @@ async def _embed_via_code_service(
     )
     try:
         async with AsyncClient(timeout=120.0) as client:
-            r = await client.post(
-                _CODE_EMBED_URL,
-                json={"model": _CODE_EMBED_MODEL, "input": payload_texts},
-            )
-            if r.status_code != 200:
-                logger.warning(
-                    f"[CODE-EMBED] {_CODE_EMBED_MODEL} returned {r.status_code}; "
-                    f"batch of {len(texts)} treated as failed"
-                )
-                return [None] * len(texts)
-            data = sorted(r.json().get("data", []), key=lambda d: d.get("index", 0))
-            vecs = [d.get("embedding") for d in data]
-            if len(vecs) != len(texts):
-                logger.warning(
-                    f"[CODE-EMBED] expected {len(texts)} vectors, got {len(vecs)} "
-                    f"(model={_CODE_EMBED_MODEL}) — treating batch as failed"
-                )
-                return [None] * len(texts)
-            return vecs
+            return await _code_embed_split(client, payload_texts)
     except Exception as e:
         logger.warning(f"[CODE-EMBED] {_CODE_EMBED_MODEL} failed: {e}")
         return [None] * len(texts)
+
+
+# A served embedder rejects a request whose LONGEST input overflows its per-slot
+# context, and it rejects the WHOLE batch (400/413) -- every other text in it goes
+# unembedded with it. Measured on the served GGUF lane: 400 chars is batch-safe,
+# ~800 passes alone, ~990 is refused. The chunk text builder emits up to ~1,000
+# chars, so a 64-text batch almost always carries one over-long text; the service's
+# hourly pass reported "done" while CEC001 read 6.3% coverage. A context refusal is
+# therefore SPLIT (bisect the batch; truncate a lone text to this cap) instead of
+# dropping all 64. Transport errors and 5xx are NOT split: a down backend would only
+# be hammered harder.
+_CODE_EMBED_RETRY_CHARS = int(os.getenv("AITHER_CODEGRAPH_EMBED_RETRY_CHARS", "400"))
+_CODE_EMBED_SPLIT_STATUSES = (400, 413, 422)
+
+
+async def _code_embed_split(client, payload_texts: List[str]) -> List[Optional[list]]:
+    """POST one batch; on a context refusal, bisect it so good texts still embed."""
+    n = len(payload_texts)
+    r = await client.post(
+        _CODE_EMBED_URL,
+        json={"model": _CODE_EMBED_MODEL, "input": payload_texts},
+    )
+    if r.status_code == 200:
+        data = sorted(r.json().get("data", []), key=lambda d: d.get("index", 0))
+        vecs = [d.get("embedding") for d in data]
+        if len(vecs) != n:
+            logger.warning(
+                f"[CODE-EMBED] expected {n} vectors, got {len(vecs)} "
+                f"(model={_CODE_EMBED_MODEL}) — treating batch as failed"
+            )
+            return [None] * n
+        return vecs
+    if r.status_code in _CODE_EMBED_SPLIT_STATUSES:
+        if n > 1:
+            mid = n // 2
+            return (await _code_embed_split(client, payload_texts[:mid])
+                    + await _code_embed_split(client, payload_texts[mid:]))
+        text = payload_texts[0]
+        if _CODE_EMBED_RETRY_CHARS > 0 and len(text) > _CODE_EMBED_RETRY_CHARS:
+            return await _code_embed_split(client, [text[:_CODE_EMBED_RETRY_CHARS]])
+    logger.warning(
+        f"[CODE-EMBED] {_CODE_EMBED_MODEL} returned {r.status_code}; "
+        f"batch of {n} treated as failed"
+    )
+    return [None] * n
 
 
 async def _embed_texts(
