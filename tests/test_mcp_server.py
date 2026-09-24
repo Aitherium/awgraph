@@ -22,6 +22,18 @@ mcp_server = pytest.importorskip(
     "awgraph.mcp_server", reason="awgraph[mcp] not installed")
 pytest.importorskip("mcp", reason="awgraph[mcp] not installed")
 
+try:  # awgraph[mcp] pins mcp>=2.0; `mcp.server.MCPServer` is the 2.x entry point
+    from mcp.server import MCPServer as _MCPServer  # noqa: F401
+    _HAS_MCP2 = True
+except ImportError:
+    _HAS_MCP2 = False
+
+#: A 1.x `mcp` installed alongside (another package pinned it) is not the extra
+#: this surface ships against: build_server() raises the install hint, which is
+#: correct behaviour, so the server tests SKIP rather than report 8 failures.
+requires_mcp2 = pytest.mark.skipif(
+    not _HAS_MCP2, reason="awgraph[mcp] needs mcp>=2.0 (mcp.server.MCPServer absent)")
+
 SRC = '''
 class BackoffPolicy:
     """Backoff policy for flaky calls."""
@@ -62,6 +74,7 @@ def _call(name: str, **args) -> str:
     return _text(asyncio.run(server.call_tool(name, args)))
 
 
+@requires_mcp2
 def test_server_declares_the_documented_tools():
     """The tool NAMES are the contract users paste into a client config."""
     server = mcp_server.build_server()
@@ -71,6 +84,7 @@ def test_server_declares_the_documented_tools():
             "code_stats"} <= names, f"missing tools: {sorted(names)}"
 
 
+@requires_mcp2
 def test_search_before_index_says_so_rather_than_returning_empty(repo):
     """The distinction an agent cannot otherwise make.
 
@@ -83,6 +97,7 @@ def test_search_before_index_says_so_rather_than_returning_empty(repo):
     assert "code_index" in out, "the message must name the tool that fixes it"
 
 
+@requires_mcp2
 def test_index_then_search_returns_real_symbols(repo):
     indexed = _call("code_index", path=repo)
     assert "Indexed" in indexed and "0 chunks" not in indexed, indexed[:300]
@@ -93,12 +108,14 @@ def test_index_then_search_returns_real_symbols(repo):
     assert "client.py" in found, "results must carry a file location"
 
 
+@requires_mcp2
 def test_calls_resolves_edges(repo):
     _call("code_index", path=repo)
     out = _call("code_calls", symbol="send_request", path=repo)
     assert "_do_send" in out, out[:400]
 
 
+@requires_mcp2
 def test_unknown_symbol_is_reported_not_silently_empty(repo):
     """The control: a real negative answer must be legible as one."""
     _call("code_index", path=repo)
@@ -106,6 +123,7 @@ def test_unknown_symbol_is_reported_not_silently_empty(repo):
     assert "No symbol" in out, out[:300]
 
 
+@requires_mcp2
 def test_stats_reports_embedding_coverage(repo):
     """0% coverage must be stated: keyword-only degradation is silent."""
     _call("code_index", path=repo)
@@ -115,6 +133,7 @@ def test_stats_reports_embedding_coverage(repo):
         "with no embeddings configured, stats must SAY search is keyword-only")
 
 
+@requires_mcp2
 def test_index_of_a_tree_with_no_python_says_so(tmp_path, monkeypatch):
     """An empty result must name the REASON, and the reason is not always the same.
 
@@ -140,6 +159,7 @@ def test_index_of_a_tree_with_no_python_says_so(tmp_path, monkeypatch):
         assert "multilang" in out, out[:300]
 
 
+@requires_mcp2
 def test_empty_tree_reports_nothing_indexable(tmp_path, monkeypatch):
     """A genuinely empty tree must still report zero, whatever is installed.
 
