@@ -1829,14 +1829,14 @@ class CodeGraph(BaseFacultyGraph):
         total_ms = (time.perf_counter() - total_start) * 1000
 
         # Count high-risk nodes
-        high_risk = [c for c in self.chunks.values() if c.centrality >= 0.5]
+        high_risk = [c for c in list(self.chunks.values()) if c.centrality >= 0.5]
 
         stats = {
             "total_files": self.total_files,
             "total_chunks": len(self.chunks),
-            "functions": sum(1 for c in self.chunks.values() if c.chunk_type == ChunkType.FUNCTION),
-            "methods": sum(1 for c in self.chunks.values() if c.chunk_type == ChunkType.METHOD),
-            "classes": sum(1 for c in self.chunks.values() if c.chunk_type == ChunkType.CLASS),
+            "functions": sum(1 for c in list(self.chunks.values()) if c.chunk_type == ChunkType.FUNCTION),
+            "methods": sum(1 for c in list(self.chunks.values()) if c.chunk_type == ChunkType.METHOD),
+            "classes": sum(1 for c in list(self.chunks.values()) if c.chunk_type == ChunkType.CLASS),
             "high_centrality_nodes": len(high_risk),
             "git_enrichment": git_stats_result,
             "discovery_ms": self.discovery_ms,
@@ -1970,7 +1970,7 @@ class CodeGraph(BaseFacultyGraph):
 
         # Prioritize chunks with docstrings (most documentation = most value)
         documented_chunks = [
-            c for c in self.chunks.values()
+            c for c in list(self.chunks.values())
             if c.docstring and len(c.docstring.strip()) > 20
         ]
         # Sort by docstring length descending (richest docs first)
@@ -2098,7 +2098,7 @@ class CodeGraph(BaseFacultyGraph):
         """
         # Build a map of name -> chunk_ids
         name_map: Dict[str, List[str]] = defaultdict(list)
-        for chunk_id, chunk in self.chunks.items():
+        for chunk_id, chunk in list(self.chunks.items()):
             # Map both full name and short name
             name_map[chunk.name].append(chunk_id)
             if "." in chunk.name:
@@ -2106,7 +2106,7 @@ class CodeGraph(BaseFacultyGraph):
                 name_map[short_name].append(chunk_id)
 
         # For each chunk, add it to the called_by list of what it calls
-        for caller_id, caller in self.chunks.items():
+        for caller_id, caller in list(self.chunks.items()):
             for called_name in caller.calls:
                 # Determine expected module if it comes from an import
                 expected_module = None
@@ -2192,13 +2192,13 @@ class CodeGraph(BaseFacultyGraph):
 
         max_fan_in = 1  # avoid division by zero
 
-        for chunk in self.chunks.values():
+        for chunk in list(self.chunks.values()):
             chunk.fan_in = len(chunk.called_by)
             chunk.fan_out = len(chunk.calls)
             if chunk.fan_in > max_fan_in:
                 max_fan_in = chunk.fan_in
 
-        for chunk in self.chunks.values():
+        for chunk in list(self.chunks.values()):
             chunk.centrality = chunk.fan_in / max_fan_in
 
     async def enrich_with_git_stats(
@@ -2371,7 +2371,7 @@ class CodeGraph(BaseFacultyGraph):
             List of risk dicts sorted by combined risk score.
         """
         risky = []
-        for chunk in self.chunks.values():
+        for chunk in list(self.chunks.values()):
             if chunk.chunk_type == ChunkType.MODULE:
                 continue
             risk_score = (chunk.centrality * 0.6) + (
@@ -2426,7 +2426,7 @@ class CodeGraph(BaseFacultyGraph):
         exclude_patterns = exclude_patterns or []
         orphans: List[Dict[str, Any]] = []
 
-        for chunk_id, chunk in self.chunks.items():
+        for chunk_id, chunk in list(self.chunks.items()):
             # Skip modules — top-level modules always have 0 callers
             if chunk.chunk_type == ChunkType.MODULE:
                 continue
@@ -2511,7 +2511,7 @@ class CodeGraph(BaseFacultyGraph):
         """Score all chunks against query tokens. CPU-bound work, run via offload()."""
         results: List[Tuple[float, CodeChunk]] = []
 
-        for chunk in self.chunks.values():
+        for chunk in list(self.chunks.values()):
             # ── Scope filtering ──
             if tenant_id and chunk.tenant_id not in (tenant_id, "platform"):
                 continue
@@ -3082,7 +3082,7 @@ class CodeGraph(BaseFacultyGraph):
         """
         documents = []
 
-        for chunk in self.chunks.values():
+        for chunk in list(self.chunks.values()):
             # Build the text to embed
             text_parts = [chunk.signature]
             if chunk.docstring:
@@ -3483,7 +3483,7 @@ class CodeGraph(BaseFacultyGraph):
         # chunk carrying a user_id must not be upserted with scope_user="" (which
         # would make it visible to the whole workspace). "" stays workspace-wide.
         by_scope: dict = {}
-        for chunk in self.chunks.values():
+        for chunk in list(self.chunks.values()):
             if chunk.embedding is None:
                 continue
             scope_key = (chunk.tenant_id or "platform",
@@ -3543,7 +3543,7 @@ class CodeGraph(BaseFacultyGraph):
         """Fraction of chunks with embeddings (0.0–1.0)."""
         if not self.chunks:
             return 0.0
-        return sum(1 for c in self.chunks.values() if c.embedding is not None) / len(self.chunks)
+        return sum(1 for c in list(self.chunks.values()) if c.embedding is not None) / len(self.chunks)
 
     async def semantic_query(
         self,
@@ -3564,7 +3564,7 @@ class CodeGraph(BaseFacultyGraph):
         # This ran a ~95K-item scan on every query, synchronously, before any
         # await point, which is part of why the caller's asyncio.wait_for cap
         # could not bound this call (see the numpy branch below).
-        if not any(c.embedding is not None for c in self.chunks.values()):
+        if not any(c.embedding is not None for c in list(self.chunks.values())):
             logger.warning("No embeddings available — call embed_chunks() first")
             return []
 
@@ -3618,7 +3618,7 @@ class CodeGraph(BaseFacultyGraph):
         else:
             # Pure-Python fallback
             embedded = [
-                (cid, c) for cid, c in self.chunks.items() if c.embedding is not None
+                (cid, c) for cid, c in list(self.chunks.items()) if c.embedding is not None
             ]
             q_norm = math.sqrt(sum(x * x for x in query_vec))
             if q_norm == 0:
@@ -3651,7 +3651,7 @@ class CodeGraph(BaseFacultyGraph):
             return
         if not _HAS_NUMPY:
             return
-        embedded = [(cid, c) for cid, c in self.chunks.items() if c.embedding is not None]
+        embedded = [(cid, c) for cid, c in list(self.chunks.items()) if c.embedding is not None]
         if not embedded:
             return
         t0 = time.time()
@@ -4304,7 +4304,7 @@ class CodeGraph(BaseFacultyGraph):
         # Check if semantic search is available (cached flag avoids 28K-item scan)
         if not hasattr(self, '_has_embeddings_cached'):
             self._has_embeddings_cached = any(
-                c.embedding is not None for c in self.chunks.values()
+                c.embedding is not None for c in list(self.chunks.values())
             )
         if not self._has_embeddings_cached or not _can_embed_queries():
             if self._has_embeddings_cached and not _can_embed_queries():
@@ -4536,7 +4536,7 @@ class CodeGraph(BaseFacultyGraph):
         """Estimate memory usage of the CodeGraph in megabytes."""
         total_bytes = 0
         # Chunks
-        for chunk in self.chunks.values():
+        for chunk in list(self.chunks.values()):
             total_bytes += len(getattr(chunk, "body_preview", "") or "")
             total_bytes += len(getattr(chunk, "signature", "") or "")
             total_bytes += len(getattr(chunk, "docstring", "") or "")
@@ -4608,7 +4608,7 @@ class CodeGraph(BaseFacultyGraph):
         test_functions = 0
         test_lines = 0
 
-        for chunk in self.chunks.values():
+        for chunk in list(self.chunks.values()):
             ct = chunk.chunk_type
             if ct == ChunkType.FUNCTION:
                 functions += 1
