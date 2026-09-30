@@ -1806,10 +1806,19 @@ class CodeGraph(BaseFacultyGraph):
             on_progress(0.85, "Building call graph...")
 
         backfill_start = time.perf_counter()
-        self._backfill_called_by()
-        # v2: re-key freshly-parsed v1 ids to rename-safe stable ids (no-op on v1)
+        # OFF the event loop. The full-index backfill is O(N·edges) pure Python:
+        # on genesis (~28K chunks) it held the loop for >240 s on a standard GIL
+        # interpreter, so gunicorn's heartbeat missed and the worker was SIGABRTed
+        # mid-index (measured 2026-09-29, stack: _bg_index -> index_codebase ->
+        # _backfill_called_by). The incremental path already offloads it
+        # (reindex_changed_files); the full path did not. It only reads chunks and
+        # appends to called_by lists, so a thread is safe; a GIL thread still lets
+        # the loop run every switch interval.
+        await asyncio.to_thread(self._backfill_called_by)
+        # v2: re-key freshly-parsed v1 ids to rename-safe stable ids (no-op on v1).
+        # Kept on-loop: it reassigns self.chunks/by_file.
         _finalize_stable_ids(self)
-        self._compute_centrality()
+        await asyncio.to_thread(self._compute_centrality)
         self._invalidate_keyword_cache()
         self.backfill_ms = (time.perf_counter() - backfill_start) * 1000
 

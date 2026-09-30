@@ -5,6 +5,16 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.14] - 2026-09-29
+
+### Fixed
+
+- **A full index no longer blocks the event loop.** `index_codebase` ran
+  `_backfill_called_by` and `_compute_centrality` synchronously inside the
+  coroutine; on a ~28K-chunk graph under a standard GIL interpreter that held
+  the loop for >240 s and gunicorn SIGABRTed the genesis worker mid-index. Both
+  now run via `asyncio.to_thread`, as the incremental path already did.
+
 ## [1.4.12] - 2026-09-23
 
 ### Fixed
