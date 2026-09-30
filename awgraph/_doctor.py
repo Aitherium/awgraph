@@ -32,8 +32,8 @@ PAIRS_WITH = ['adk', 'awembed', 'awm', 'awtoll']
 #: the caller cope. Only this brick's namespace is listed: reporting the
 #: platform-wide vars it also touches would be noise, and a doctor that floods
 #: gets ignored.
-ENV_REQUIRED = ['AWGRAPH_CACHE_DIR']
-ENV_OPTIONAL = ['AWGRAPH_MODEL_BALANCED', 'AWGRAPH_MODEL_DEEP', 'AWGRAPH_MODEL_FAST']
+ENV_REQUIRED = []
+ENV_OPTIONAL = ['AWGRAPH_CACHE_DIR', 'AWGRAPH_MODEL_BALANCED', 'AWGRAPH_MODEL_DEEP', 'AWGRAPH_MODEL_FAST']
 
 
 def _installed(mod: str) -> "str | None":
