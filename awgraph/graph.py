@@ -847,6 +847,20 @@ def _parse_non_python(file_path: str, content: str, lines: List[str],
         ))
 
 
+def _in_container() -> bool:
+    """True inside a docker OR podman container.
+
+    The index parses in a ProcessPoolExecutor outside containers and in threads inside
+    one. The test was `/.dockerenv` alone, which podman does not create (it writes
+    `/run/.containerenv`): on the podman fleet every full index ran a process pool from
+    a worker thread of a live uvloop service, and aither-worker aborted inside libuv
+    (`uv__io_poll -> abort`, exit 139) during exactly that phase on 2026-10-01 and twice
+    on 2026-10-02.
+    """
+    return (os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+            or bool(os.environ.get("container")))
+
+
 def parse_file_sync(file_path: str, content: Optional[str] = None) -> FileGraph:
     """
     Parse a single Python file into a FileGraph.
@@ -1699,10 +1713,12 @@ class CodeGraph(BaseFacultyGraph):
 
         # In Docker, ProcessPoolExecutor reliably crashes due to /dev/shm limits.
         # Use ThreadPoolExecutor directly in Docker to avoid BrokenProcessPool spam.
-        _in_docker = os.path.exists("/.dockerenv")
+        _in_docker = _in_container()
 
         results: List[FileGraph] = []
         pool_type = "thread" if _in_docker else "process"
+        if os.environ.get("AWGRAPH_PARSE_POOL") in ("thread", "process"):
+            pool_type = os.environ["AWGRAPH_PARSE_POOL"]
 
         if pool_type == "process":
             try:
