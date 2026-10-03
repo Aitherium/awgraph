@@ -853,7 +853,7 @@ def _in_container() -> bool:
     The index parses in a ProcessPoolExecutor outside containers and in threads inside
     one. The test was `/.dockerenv` alone, which podman does not create (it writes
     `/run/.containerenv`): on the podman fleet every full index ran a process pool from
-    a worker thread of a live uvloop service, and aither-worker aborted inside libuv
+    a worker thread of a live uvloop service, and the fleet's worker aborted inside libuv
     (`uv__io_poll -> abort`, exit 139) during exactly that phase on 2026-10-01 and twice
     on 2026-10-02.
     """
@@ -3276,7 +3276,7 @@ class CodeGraph(BaseFacultyGraph):
         # A LIVE service reconciles this graph on its own schedule (a watcher
         # re-indexes), so iterating the live dict ends in "dictionary changed
         # size during iteration" mid-pass -- measured 2026-09-11 inside
-        # aither-cognition-advanced, whose pass died at exactly this loop while
+        # a fleet indexing service, whose pass died at exactly this loop while
         # its service re-indexed. Snapshot ONCE and use it for the rest of the
         # pass: the pass embeds the chunks that existed when it started, and a
         # reconcile that lands meanwhile is picked up by the next one
