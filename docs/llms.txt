@@ -1,0 +1,36 @@
+# awgraph
+
+> A semantic code graph for agents — AST + tree-sitter, call graphs.
+
+"Who calls this?" answered by grep is a guess. Agents burn enormous context re-reading files to rebuild a graph the parser already knows.
+
+## Install
+
+```
+pip install awgraph
+```
+
+## In Claude Code
+
+- mcp: `awgraph mcp`
+
+## Use it in 30 seconds
+
+Index one repo and ask it who calls one function.
+
+## Composes with
+
+- [awm](https://aitherium.github.io/awm/) — A portable, scoped agent memory.
+- [awdk](https://aitherium.github.io/awdk/) — Build AI agent fleets — 3 lines, any backend, local or cloud.
+- [awtoll](https://aitherium.github.io/awtoll/) — What every tool call costs you in context, measured from your own transcripts.
+- [awembed](https://aitherium.github.io/awembed/) — Train an embedding model that knows your corpus, and prove it beats the big one.
+
+## Where it lives
+
+- Repo: https://github.com/Aitherium/awgraph
+- Docs: https://aitherium.github.io/awgraph/
+- Manifest (keys + the one-line adoption story): https://aitherium.github.io/awgraph/aither-manifest.json
+
+This repository is mirrored from the AitherOS monorepo by `.github/workflows/sync-awgraph.yml`; hand edits made here are overwritten on the next sync — change the source instead.
+
+Everything Aitherium, in one file for agents: https://aitherium.com/llms.txt
