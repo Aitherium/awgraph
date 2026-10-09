@@ -50,6 +50,20 @@ from array import array
 from collections import OrderedDict, defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
+
+
+def default_max_workers() -> int:
+    """Parse workers: AWGRAPH_MAX_WORKERS, else 4.
+
+    Each ProcessPool worker holds ~800 MB on this repo; the old fixed 8 put ~6.5 GB of
+    workers on the host every 30 min for the background reindex (measured 2026-10-08,
+    Windows commit at 181/209 GB). 4 keeps a foreground index quick without that peak.
+    """
+    try:
+        n = int(os.environ.get("AWGRAPH_MAX_WORKERS", "") or 4)
+    except ValueError:
+        n = 4
+    return max(1, min(n, os.cpu_count() or 4))
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -1623,7 +1637,7 @@ class CodeGraph(BaseFacultyGraph):
 
     def __init__(
         self,
-        max_workers: int = 8,
+        max_workers: Optional[int] = None,
         root_path: Optional[str] = None,
         cache_dir: Optional[str] = None,
         auto_index: bool = False,
@@ -1638,7 +1652,7 @@ class CodeGraph(BaseFacultyGraph):
             batch_size=50,
             provenance=True,
         )
-        self.max_workers = max_workers
+        self.max_workers = max_workers if max_workers else default_max_workers()
 
         # The index
         self.chunks: Dict[str, CodeChunk] = {}  # id -> chunk
@@ -4703,7 +4717,7 @@ async def main():
     print(f"{'='*60}")
     print(f"Root: {root_path}")
 
-    graph = CodeGraph(max_workers=8)
+    graph = CodeGraph()
 
     def on_progress(progress: float, message: str):
         print(f"[{progress*100:5.1f}%] {message}")
