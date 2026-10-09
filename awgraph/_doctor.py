@@ -23,7 +23,15 @@ import sys
 #: package cannot read the registry, and a doctor that guessed at the family
 #: would go stale in silence. Regenerate to update.
 SELF = 'awgraph'
-FAMILY = ['awask', 'awavatar', 'awbac', 'awbrain', 'awbrowse', 'awcams', 'awclassify', 'awdecide', 'awdeck', 'awdelphi', 'awdit', 'awembed', 'awevolve', 'awfind', 'awflow', 'awfocus', 'awgit', 'awgym', 'awiam', 'awkno', 'awm', 'awmail', 'awmine', 'awnboard', 'awnest', 'awnet', 'awnode', 'awpool', 'awpredict', 'awprism', 'awprove', 'awreason', 'awrecover', 'awrecurse', 'awrelay', 'awrena', 'awrepl', 'awreport', 'awresearch', 'awrise', 'awrouter', 'awrtifact', 'awrun', 'awscope', 'awscreen', 'awseal', 'awsettings', 'awshare', 'awsprite', 'awstorage', 'awsuite', 'awswarm', 'awtax', 'awtoll', 'awtunnel', 'awvision', 'awvoice', 'awwall', 'gawbbonet']
+FAMILY = [
+    'awask', 'awavatar', 'awbac', 'awbrain', 'awbrowse', 'awcams', 'awclassify', 'awdecide',
+    'awdeck', 'awdelphi', 'awdit', 'awembed', 'awevolve', 'awfind', 'awflow', 'awfocus', 'awgit',
+    'awgym', 'awiam', 'awkno', 'awm', 'awmail', 'awmine', 'awnboard', 'awnest', 'awnet', 'awplay',
+    'awpool', 'awpredict', 'awprism', 'awprove', 'awreason', 'awrecover', 'awrecurse', 'awrelay',
+    'awrena', 'awrepl', 'awreport', 'awresearch', 'awrise', 'awrouter', 'awrtifact', 'awrun',
+    'awscope', 'awscreen', 'awseal', 'awsettings', 'awshare', 'awsprite', 'awstorage', 'awsuite',
+    'awswarm', 'awtax', 'awtoll', 'awtunnel', 'awvision', 'awvoice', 'awwall', 'gawbbonet',
+]
 PAIRS_WITH = ['adk', 'awembed', 'awm', 'awtoll']
 
 #: This brick's OWN config, read out of its source at generation time.
@@ -33,7 +41,10 @@ PAIRS_WITH = ['adk', 'awembed', 'awm', 'awtoll']
 #: platform-wide vars it also touches would be noise, and a doctor that floods
 #: gets ignored.
 ENV_REQUIRED = ['AWGRAPH_PARSE_POOL']
-ENV_OPTIONAL = ['AWGRAPH_CACHE_DIR', 'AWGRAPH_MODEL_BALANCED', 'AWGRAPH_MODEL_DEEP', 'AWGRAPH_MODEL_FAST']
+ENV_OPTIONAL = [
+    'AWGRAPH_CACHE_DIR', 'AWGRAPH_MAX_WORKERS', 'AWGRAPH_MODEL_BALANCED', 'AWGRAPH_MODEL_DEEP',
+    'AWGRAPH_MODEL_FAST',
+]
 
 
 def _installed(mod: str) -> "str | None":
