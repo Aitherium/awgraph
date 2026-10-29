@@ -396,6 +396,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         if _aw_state.cli_banner(_sv if _sv is not None else __import__("sys").argv[1:]):
             return 0
     args = build_parser().parse_args(argv)
+    # A read command must never outlive its caller holding the full index in memory
+    # (8-12 GB): see _guard.py for the measured incident and the limits.
+    from awgraph._guard import install as _guard
+
+    _guard(args.cmd)
     if args.cmd == "mcp":
         # Not routed through asyncio.run below: the MCP server owns its own loop
         # and blocks until the client disconnects.
