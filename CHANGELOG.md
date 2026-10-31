@@ -5,6 +5,15 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.16] - 2026-10-31
+
+### Fixed
+
+- **The process guard can no longer be blocked by its own message.** When the caller died
+  and left its stderr pipe full and unread, the guard's report blocked on that pipe and the
+  process never exited: a `query` held 9.7 GB for 45 minutes past every limit. The guard now
+  writes its reason from a side thread, waits at most 0.5 s for it, and exits regardless.
+
 ## [1.4.14] - 2026-09-29
 
 ### Fixed

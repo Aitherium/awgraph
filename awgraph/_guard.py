@@ -106,6 +106,30 @@ def reason(ppid: int, started: float, now: float, max_s: float, max_gb: float,
     return ""
 
 
+def _say(msg: str) -> None:
+    """Write msg to stderr without ever blocking: a raw write to fd 2 from a helper thread."""
+    try:
+        os.write(2, msg.encode("utf-8", "replace"))
+    except OSError:
+        pass
+
+
+def _end(cmd: str, why: str, wait: float = 0.5) -> None:
+    """End the process NOW. The reason goes to stderr on a side thread, given ``wait`` s at most.
+
+    Measured 2026-10-31: an ``awgraph query`` held 9.7 GB for 45 minutes, past every limit,
+    with the guard installed. Its caller had died and the launcher shim kept the caller's
+    stderr pipe open with nobody reading it; the guard's ``print(..., flush=True)`` blocked
+    on the full pipe (and on ``sys.stderr``'s lock, held by the main thread's own blocked
+    write), so ``os._exit`` was never reached. The exit can never wait on the message.
+    """
+    msg = "awgraph: guard: ending %s - %s\n" % (cmd, why)
+    t = threading.Thread(target=_say, args=(msg,), daemon=True)
+    t.start()
+    t.join(wait)
+    os._exit(EXIT_DEAD)
+
+
 def install(cmd: str, interval: float = 5.0) -> Optional[threading.Thread]:
     """Start the watchdog for ``cmd``. Returns the thread, or None when disabled."""
     if os.environ.get("AWGRAPH_NO_GUARD") == "1":
@@ -120,8 +144,7 @@ def install(cmd: str, interval: float = 5.0) -> Optional[threading.Thread]:
             time.sleep(interval)
             why = reason(ppid, started, time.monotonic(), max_s, max_gb, parent_alive, private_gb)
             if why:
-                print("awgraph: guard: ending %s - %s" % (cmd, why), file=sys.stderr, flush=True)
-                os._exit(EXIT_DEAD)
+                _end(cmd, why)
 
     t = threading.Thread(target=watch, name="awgraph-guard", daemon=True)
     t.start()

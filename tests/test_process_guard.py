@@ -74,3 +74,33 @@ def test_real_orphan_is_ended_when_its_parent_dies(tmp_path):
     while time.time() < deadline and G.parent_alive(pid):
         time.sleep(0.2)
     assert not G.parent_alive(pid), "orphaned guarded child survived its parent"
+
+
+def test_guard_ends_the_process_when_stderr_is_a_full_pipe_nobody_reads():
+    """Fail direction: the caller is gone and its stderr pipe is full and never read.
+
+    The guard used to report with ``print(..., flush=True)``, which blocked on that pipe (and
+    on ``sys.stderr``'s lock, held by the main thread's own blocked write), so ``os._exit``
+    never ran: a query held 9.7 GB for 45 minutes past every limit. The exit never waits on
+    the message.
+    """
+    child_code = (
+        "import os, sys, threading, time; sys.path.insert(0, %r);"
+        "os.environ['AWGRAPH_MAX_SECONDS'] = '0.5';"
+        "from awgraph import _guard;"
+        "t = threading.Thread(target=lambda: sys.stderr.write('x' * 400000), daemon=True);"
+        "t.start(); time.sleep(0.3);"
+        "_guard.install('query', interval=0.2); time.sleep(30)"
+    ) % os.path.dirname(os.path.dirname(G.__file__))
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # stderr piped and NEVER read: the 400 KB write fills the pipe and blocks
+    p = subprocess.Popen([sys.executable, "-c", child_code], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.PIPE, creationflags=flags)
+    try:
+        deadline = time.time() + 15
+        while p.poll() is None and time.time() < deadline:
+            time.sleep(0.1)
+        assert p.poll() == G.EXIT_DEAD, "guard did not end a process blocked on stderr"
+    finally:
+        if p.poll() is None:
+            p.kill()
