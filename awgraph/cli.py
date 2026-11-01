@@ -132,7 +132,31 @@ async def cmd_query(args: argparse.Namespace) -> int:
         if extra:
             text = f"{text} {extra}"
     chunks = await graph.hybrid_query(text, max_results=args.k)
+    chunks = await _tokengate_filter(text, chunks)
     return _print_rows([_chunk_row(c, root) for c in chunks], args.json)
+
+
+async def _tokengate_filter(text, chunks):
+    """Context selection after retrieval — PASS-THROUGH unless it is provably safe.
+
+    ``awgraph`` is a brick: it must run alone, so ``lib`` is imported lazily and
+    only when the AitherOS retrieval selector is actually installed. The
+    selector itself is promotion-gated (the active TokenGate checkpoint has to
+    have passed the natural-text eval), so outside AitherOS, or before a gate
+    passes, this returns the input list unchanged.
+    """
+    if len(chunks) < 2:
+        return chunks
+    try:
+        from lib.retrieval import tokengate_selector as selector
+    except ImportError:
+        return chunks
+    try:
+        picked = await selector.aselect([getattr(c, "content", "") or "" for c in chunks], text)
+    except Exception:  # noqa: BLE001 - an optimisation layer never breaks the query
+        return chunks
+    return [chunks[i] for i in picked.index] if picked else chunks
+
 
 
 def _answer_from_store(symstore, side: str, args: argparse.Namespace,
