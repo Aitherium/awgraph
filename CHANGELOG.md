@@ -5,6 +5,12 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.17] - 2026-11-07
+
+### Fixed
+
+- Container-detection test docstring no longer names an internal service, so the sdist passes the publish-time moat guard.
+
 ## [1.4.16] - 2026-10-31
 
 ### Fixed

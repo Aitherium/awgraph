@@ -1,8 +1,9 @@
 """Inside ANY container the index parses in threads, never a process pool.
 
-aither-worker aborted inside libuv (`uv__io_poll -> abort`, exit 139) three times while a
-full CodeGraph index was parsing with a ProcessPoolExecutor from a worker thread of the
-live uvloop service. The pool was only chosen because the container test looked for
+A long-running worker service aborted inside libuv (`uv__io_poll -> abort`,
+exit 139) three times while a full CodeGraph index was parsing with a
+ProcessPoolExecutor from a worker thread of the live uvloop service. The pool
+was only chosen because the container test looked for
 `/.dockerenv`, which podman does not create.
 """
 from __future__ import annotations
