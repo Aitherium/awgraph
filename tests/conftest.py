@@ -18,6 +18,9 @@ import pytest
 def _isolated_awgraph_cache(tmp_path_factory, monkeypatch):
     cache = tmp_path_factory.mktemp("awgraph-cache")
     monkeypatch.setenv("AWGRAPH_CACHE_DIR", str(cache))
+    # Host admission off: a developer box near its commit limit would otherwise defer
+    # every `awgraph index` a test runs. The admission tests opt back in.
+    monkeypatch.setenv("AWGRAPH_ADMIT_COMMIT_PCT", "0")
     # No test may reach a real host-shared graph server (a live daemon on this box
     # would answer for the wrong tree). Tests of that path opt back in.
     monkeypatch.setenv("AWGRAPH_SHARED", "0")

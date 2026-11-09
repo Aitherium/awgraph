@@ -5,6 +5,29 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.19] - 2026-11-08
+
+### Fixed
+- Host memory: a 10.8 GB query worker and a 3.4 GB reindex of the same root ran at
+  once with the host at 93-96% commit. `awgraph index` now defers (exit 0, a line
+  starting `awgraph index: skipped:`) while the host's commit charge is at or above
+  `AWGRAPH_ADMIT_COMMIT_PCT` (default 85; 0 disables) or while another full load of
+  the same root holds its lock (`awgraph._admit.FullLoadLock`, an OS file lock beside
+  the root's cache that dies with its holder).
+- `awgraph query` no longer hydrates embedding vectors when no query lane exists:
+  the answer is keyword-only either way, and the vector cache (boxed floats) cost
+  ~9 GB transient on the host repo.
+- The CLI caps OpenBLAS at 2 threads unless the caller set `OPENBLAS_NUM_THREADS`:
+  at its default 24, `import numpy` alone committed 760 MB per process.
+- The chunk-cache load frees each serialized row as it builds the chunk and interns
+  repeated strings (paths, call targets, imports).
+- Generated files are not indexed: lockfiles, `*.min.*`, data files
+  (`.json/.jsonl/.csv/...`) over `AWGRAPH_MAX_DATA_BYTES` (1 MiB of characters), and
+  `.js/.cjs/.mjs/.css` bundles with a line over `AWGRAPH_MAX_LINE_CHARS` (5000). 32,736 of 532,965 chunks
+  (6.1%) on the host repo, most of them in TRACKED files `.gitignore` cannot drop.
+
+ ## [1.4.18] - 2026-11-08
+ 
 ## [1.4.18] - 2026-11-08
 
 ### Added

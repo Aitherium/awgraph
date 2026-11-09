@@ -31,6 +31,8 @@ from awgraph import __version__
 EXIT_OK = 0
 EXIT_EMPTY = 1
 EXIT_DEAD = 2
+#: How the line `index` prints when it defers (host commit, a busy root) begins.
+SKIPPED_PREFIX = "awgraph index: skipped: "
 
 
 def _fail(msg: str) -> int:
@@ -107,18 +109,50 @@ async def cmd_index(args: argparse.Namespace) -> int:
     if not os.path.isdir(root):
         return _fail("not a directory: " + root)
 
-    t0 = time.perf_counter()
-    graph, _ = await _open_graph(root, build=True)
-    elapsed = time.perf_counter() - t0
-    n = len(graph.chunks)
-    if n == 0:
-        print("indexed 0 chunks from " + root + " — no importable Python found",
-              file=sys.stderr)
-        return EXIT_EMPTY
-    _save_chunk_cache(graph, root)
+    from awgraph._admit import FullLoadLock, admit
+
+    # A full index costs GBs: it never starts on a host already near its commit limit,
+    # nor beside another full load of the same root (a second index, a query worker).
+    # Either is a SKIP, exit 0 -- the next scheduled run resumes -- printed on a line
+    # starting with SKIPPED_PREFIX so a wrapper does not record it as a build.
+    why = admit("awgraph index")
+    lock = FullLoadLock(root, "index")
+    why = why or lock.acquire()
+    if why:
+        print(SKIPPED_PREFIX + why + "; next run resumes")
+        return EXIT_OK
+    try:
+        t0 = time.perf_counter()
+        graph, _ = await _open_graph(root, build=True)
+        elapsed = time.perf_counter() - t0
+        n = len(graph.chunks)
+        if n == 0:
+            print("indexed 0 chunks from " + root + " — no importable Python found",
+                  file=sys.stderr)
+            return EXIT_EMPTY
+        _save_chunk_cache(graph, root)
+    finally:
+        lock.release()
     print("indexed {0:,} chunks from {1} in {2:.1f}s".format(n, root, elapsed))
     print("cache: " + os.path.dirname(_get_data_path(root, "x")))
     return EXIT_OK
+
+
+def query_lane_available() -> bool:
+    """True when a QUERY can be embedded, i.e. persisted vectors can change an answer.
+
+    Without a lane hybrid_query answers keyword-only, so hydrating the vectors buys
+    nothing and is the most expensive step of the load: the vector cache is a pickle of
+    boxed Python floats (282k x 1024 on the host repo, ~9 GB transient to read, 2026-11-08).
+    """
+    try:
+        from awgraph.graph import _can_embed_queries
+    except ImportError:
+        return True
+    try:
+        return bool(_can_embed_queries())
+    except Exception:  # noqa: BLE001 -- unknown = keep the old behaviour (hydrate)
+        return True
 
 
 async def cmd_query(args: argparse.Namespace) -> int:
@@ -138,7 +172,7 @@ async def cmd_query(args: argparse.Namespace) -> int:
             return _deferred(rows.reason, args.json)
         if rows is not None:
             return _print_rows(rows, args.json)
-    graph, ok = await _open_graph(root, build=False)
+    graph, ok = await _open_graph(root, build=False, hydrate=query_lane_available())
     if not ok:
         return _fail("no index for " + root + " — run: awgraph index " + args.path)
     chunks = await graph.hybrid_query(text, max_results=args.k)
@@ -431,6 +465,18 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+#: OpenBLAS sizes per-thread buffers when numpy loads: at its default 24 threads,
+#: `import numpy` alone committed 760 MB on a 32-core host, in every awgraph process and
+#: every parse-pool worker (2 threads: 50 MB, measured 2026-11-08). awgraph's BLAS work is
+#: one matrix-vector product per query, so the CLI caps it unless the caller chose.
+BLAS_THREADS = "2"
+
+
+def _limit_blas_threads() -> None:
+    for var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS"):
+        os.environ.setdefault(var, BLAS_THREADS)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     # GENERATED doctor intercept (gen_aw_doctor.py) -- do not edit
     _dv = locals().get("argv")
@@ -447,6 +493,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if _aw_state.cli_banner(_sv if _sv is not None else __import__("sys").argv[1:]):
             return 0
     args = build_parser().parse_args(argv)
+    _limit_blas_threads()
     # A read command must never outlive its caller holding the full index in memory
     # (8-12 GB): see _guard.py for the measured incident and the limits.
     from awgraph._guard import install as _guard

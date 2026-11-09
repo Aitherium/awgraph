@@ -44,6 +44,7 @@ import math
 import os
 import pickle
 import re
+import sys
 import threading
 import time
 from array import array
@@ -803,6 +804,11 @@ def _parse_non_python(file_path: str, content: str, lines: List[str],
     """
     from awgraph import multilang  # noqa: PLC0415 - optional dependency
 
+    skip = generated_reason(file_path, content, lines)
+    if skip:
+        graph.parse_errors.append("skipped: " + skip)
+        return
+
     ok, why = multilang.available()
     if not ok:
         # Not an error: repowise is an optional extra. Recorded so a caller
@@ -1346,6 +1352,47 @@ def _extract_method(node: ast.FunctionDef | ast.AsyncFunctionDef, lines: List[st
 #: almost certainly generated/minified, where windowing produces hundreds of
 #: near-duplicate chunks and pollutes the index it was meant to help.
 SYMBOLLESS_FALLBACK_MAX_BYTES = 64 * 1024
+
+#: Files that are generated, not written: indexing them only adds near-duplicate chunks.
+#: Measured 2026-11-08 on the host repo (532,965 chunks): two TRACKED 18 MB
+#: tokenizer.json files were 24,358 chunks, data JSON over 1 MiB 27,612 in all, minified
+#: or bundled code (a line over 5,000 chars) 2,822, lockfiles 1,335, *.min.* 967 --
+#: 32,736 chunks (6.1%) nobody asks a code graph about. `.gitignore` cannot help: most
+#: of them are tracked.
+GENERATED_NAMES = frozenset({
+    "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock",
+    "composer.lock", "cargo.lock", "poetry.lock", "gemfile.lock", "uv.lock",
+    "pipfile.lock", "bun.lock",
+})
+#: Bulk data formats: windowed like prose, so a large one becomes thousands of windows.
+DATA_EXTENSIONS = frozenset({".json", ".jsonl", ".ndjson", ".csv", ".tsv", ".geojson"})
+MAX_DATA_BYTES = int(os.environ.get("AWGRAPH_MAX_DATA_BYTES", str(1 << 20)))
+#: A source line this long is a minified bundle, not code a person wrote. Judged only
+#: for the bundle formats below: a notebook (.ipynb) carries long base64 output lines
+#: and an .html page inline scripts, yet both hold text worth finding (review
+#: 2026-11-08).
+MAX_LINE_CHARS = int(os.environ.get("AWGRAPH_MAX_LINE_CHARS", "5000"))
+BUNDLE_EXTENSIONS = frozenset({".js", ".cjs", ".mjs", ".css"})
+
+
+def generated_reason(file_path: str, content: str, lines: List[str]) -> str:
+    """Why a non-Python file is generated or bulk data ("" = index it)."""
+    base = os.path.basename(file_path).lower()
+    if base in GENERATED_NAMES:
+        return "lockfile"
+    if ".min." in base:
+        return "minified (" + base + ")"
+    ext = os.path.splitext(base)[1]
+    if ext in DATA_EXTENSIONS:
+        # Characters, not bytes, are what the chunker windows; a char count is also a
+        # lower bound on the byte size, so it never skips a file under the limit.
+        if MAX_DATA_BYTES > 0 and len(content) > MAX_DATA_BYTES:
+            return "data file over %d chars" % MAX_DATA_BYTES
+        return ""
+    if (MAX_LINE_CHARS > 0 and ext in BUNDLE_EXTENSIONS
+            and any(len(ln) > MAX_LINE_CHARS for ln in lines)):
+        return "minified or bundled (a line over %d chars)" % MAX_LINE_CHARS
+    return ""
 
 _CHECKPOINT_EVERY = int(os.getenv("AITHER_CODEGRAPH_EMBED_CHECKPOINT_BATCHES", "50"))
 
@@ -5085,6 +5132,21 @@ def _hydrate_embeddings(cg: "CodeGraph", cache_path: Optional[str] = None) -> in
     return applied
 
 
+def _intern_str(value):
+    """``sys.intern`` for a str; anything else unchanged."""
+    return sys.intern(value) if type(value) is str else value
+
+
+def _intern_list(values):
+    """Intern the str items of ``values`` IN PLACE and return it (a new list would be
+    over-allocated, which cost more than interning saved on the sample index)."""
+    if type(values) is list:
+        for i, v in enumerate(values):
+            if type(v) is str:
+                values[i] = sys.intern(v)
+    return values
+
+
 def _load_chunk_cache(cg: "CodeGraph", root_path: str) -> bool:
     """Load persisted chunks from disk. Returns True if cache was valid."""
     cache_path = _get_data_path(root_path, "codegraph_chunks.pkl")
@@ -5116,24 +5178,30 @@ def _load_chunk_cache(cg: "CodeGraph", root_path: str) -> bool:
         except Exception:
             pass
 
-    # Reconstruct CodeChunk objects
-    for cid, data in chunks_data.items():
+    # Reconstruct CodeChunk objects. Each serialized row is POPPED as its chunk is
+    # built, so the unpickled rows and the chunks never both exist in full (the rows
+    # used to live until this function returned). Strings that repeat across chunks --
+    # paths, call targets, imports, class names -- are interned: pickle shares only
+    # what was one object at dump time, and the parser makes a fresh string per chunk.
+    intern = _intern_str
+    for cid in list(chunks_data):
+        data = chunks_data.pop(cid)
         try:
             chunk = CodeChunk(
                 id=data["id"],
-                name=data["name"],
+                name=intern(data["name"]),
                 chunk_type=ChunkType(data["chunk_type"]),
-                source_path=data["source_path"],
+                source_path=intern(data["source_path"]),
                 start_line=data["start_line"],
                 end_line=data["end_line"],
                 signature=data["signature"],
                 docstring=data.get("docstring"),
                 body_preview=data.get("body_preview", data.get("body", "")),
-                calls=data.get("calls", []),
-                called_by=data.get("called_by", []),
-                parent_class=data.get("parent_class"),
-                base_classes=data.get("base_classes", []),
-                imports=data.get("imports", []),
+                calls=_intern_list(data.get("calls", [])),
+                called_by=_intern_list(data.get("called_by", [])),
+                parent_class=intern(data.get("parent_class")),
+                base_classes=_intern_list(data.get("base_classes", [])),
+                imports=_intern_list(data.get("imports", [])),
             )
             chunk.tenant_id = data.get("tenant_id", "platform")
             chunk.workspace_id = data.get("workspace_id", "")

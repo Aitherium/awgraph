@@ -189,3 +189,10 @@ def test_mcp_code_search_says_deferred_not_empty():
 
     text = format_deferred("deferred: host commit 94%")
     assert "deferred, not empty" in text and "host commit 94%" in text
+
+
+def test_an_older_server_reporting_a_deferral_as_502_is_still_a_deferral(server, tmp_path):
+    server.script = [(502, {"error": "query_failed", "detail": "local code graph: "
+                            "AwgraphUnavailable: deferred: host commit 94% >= 85%"})]
+    got = shared.query(str(tmp_path), "x", 5)
+    assert isinstance(got, shared.Deferred) and got.reason.startswith("deferred: host")

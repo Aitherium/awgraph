@@ -118,6 +118,11 @@ def query(root: str, text: str, k: int,
                 if resp.status_code == 503 and (body.get("deferred")
                                                 or body.get("error") == "deferred"):
                     return Deferred(str(body.get("reason") or ""))
+                held = _deferral_in(str(body.get("detail") or ""))
+                if held:
+                    # A server from before the deferred answer reports a worker
+                    # deferral as a 502 whose detail carries the worker's reason.
+                    return Deferred(held)
                 if resp.status_code == 503 and body.get("error") == "loading":
                     if time.monotonic() < deadline:
                         sleep(2.0)
@@ -129,6 +134,12 @@ def query(root: str, text: str, k: int,
                 return None
     except Exception:  # noqa: BLE001 - any transport failure means "answer locally"
         return None
+
+
+def _deferral_in(text: str) -> str:
+    """The worker's deferral reason inside ``text`` (from ``deferred:`` on), or ""."""
+    i = text.find("deferred:")
+    return text[i:][:300] if i >= 0 else ""
 
 
 def _json(resp) -> dict:
