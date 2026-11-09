@@ -142,3 +142,50 @@ def test_with_no_server_the_query_still_answers_locally(tmp_path, monkeypatch, c
     assert rc == 0
     assert loads == [1]
     assert any(r["name"] == "send_request" for r in json.loads(capsys.readouterr().out))
+
+
+_DEFER = (503, {"error": "deferred", "deferred": True,
+                "reason": "deferred: host commit 94% >= 85% (graph worker load)"})
+
+
+def test_a_deferred_server_answers_with_the_reason_and_never_loads_locally(
+        server, tmp_path, monkeypatch, capsys):
+    server.script = [_DEFER]
+    monkeypatch.setattr(cli, "_open_graph", _tripwire)
+    rc = cli.main(["query", "retry a request", "--path", str(tmp_path), "--json"])
+    out = capsys.readouterr()
+    assert rc == cli.EXIT_DEAD  # no search ran: not a "no matches" exit 1
+    assert json.loads(out.out) == []
+    assert "host commit 94%" in out.err and "--local" in out.err
+
+
+def test_local_flag_still_loads_when_the_server_deferred(server, tmp_path, monkeypatch):
+    server.script = [_DEFER]
+    loads = []
+
+    async def counting(*a, **k):
+        loads.append(1)
+        return None, False
+
+    monkeypatch.setattr(cli, "_open_graph", counting)
+    cli.main(["query", "x", "--path", str(tmp_path), "--local"])
+    assert loads == [1] and server.queries == []
+
+
+def test_a_server_still_loading_past_the_wait_is_a_deferral(server, tmp_path, monkeypatch):
+    server.script = [(503, {"error": "loading"})]
+    monkeypatch.setenv("AWGRAPH_SHARED_WAIT_S", "0")
+    got = shared.query(str(tmp_path), "x", 5, sleep=lambda s: None)
+    assert isinstance(got, shared.Deferred) and "still loading" in got.reason
+
+
+def test_a_server_error_that_is_not_a_deferral_falls_back_locally(server, tmp_path):
+    server.script = [(502, {"error": "query_failed"})]
+    assert shared.query(str(tmp_path), "x", 5) is None
+
+
+def test_mcp_code_search_says_deferred_not_empty():
+    from awgraph.mcp_server import format_deferred
+
+    text = format_deferred("deferred: host commit 94%")
+    assert "deferred, not empty" in text and "host commit 94%" in text

@@ -187,6 +187,14 @@ def format_shared_rows(rows: list) -> str:
     }) for r in rows)
 
 
+def format_deferred(reason: str) -> str:
+    """``code_search`` text when the shared server put its graph load off."""
+    return (f"Code search is deferred, not empty: the shared graph server is not "
+            f"loading the index right now ({reason}). Nothing was searched, so do not "
+            "read this as 'no matches'. Use a text search (grep / rg) for now, or "
+            "retry in a few minutes.")
+
+
 def _no_index(root: str) -> str:
     return (f"No index for {root}. Run the `code_index` tool on this path first "
             "(one-time per repository; cached on disk outside the repo). Not "
@@ -261,6 +269,8 @@ def build_server():
         from awgraph import shared  # noqa: PLC0415
 
         rows = await asyncio.to_thread(shared.query, root, query, limit)
+        if isinstance(rows, shared.Deferred):
+            return format_deferred(rows.reason)
         if rows is not None:
             return format_shared_rows(rows)
         graph, ok = await _open(root, build=False)

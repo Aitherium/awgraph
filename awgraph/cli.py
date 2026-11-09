@@ -134,6 +134,8 @@ async def cmd_query(args: argparse.Namespace) -> int:
         from awgraph import shared
 
         rows = await asyncio.to_thread(shared.query, root, text, args.k)
+        if isinstance(rows, shared.Deferred):
+            return _deferred(rows.reason, args.json)
         if rows is not None:
             return _print_rows(rows, args.json)
     graph, ok = await _open_graph(root, build=False)
@@ -142,6 +144,19 @@ async def cmd_query(args: argparse.Namespace) -> int:
     chunks = await graph.hybrid_query(text, max_results=args.k)
     chunks = await _tokengate_filter(text, chunks)
     return _print_rows([_chunk_row(c, root) for c in chunks], args.json)
+
+
+def _deferred(reason: str, as_json: bool) -> int:
+    """The shared server declined to load the graph now: say so, never load it here.
+
+    Exit 2, not 1: no search ran, so "no matches" would be a false negative.
+    """
+    if as_json:
+        print("[]")
+    print("awgraph: the shared graph server deferred this query (" + reason + "); "
+          "not loading the index here, which is the load it just refused. Retry "
+          "later, or pass --local to load it in this process anyway.", file=sys.stderr)
+    return EXIT_DEAD
 
 
 async def _tokengate_filter(text, chunks):

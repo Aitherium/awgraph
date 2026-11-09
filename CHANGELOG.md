@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   warm graph for the same root, the query is answered without loading the index in
   the calling process. Any failure, a different root, or no server falls back to the
   local load. `--local` or `AWGRAPH_SHARED=0` opts out.
+- A server that DEFERS its graph load (host memory pressure, another full load of the
+  root) answers `503 {"deferred": true, "reason"}`; `query` then exits 2 with the
+  reason and `code_search` says the search is deferred. Neither loads the index
+  locally in that case: that is the load the server just refused. A server still
+  warming past `AWGRAPH_SHARED_WAIT_S` is treated the same way.
 
 ## [1.4.17] - 2026-11-07
 

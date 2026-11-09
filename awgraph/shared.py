@@ -12,9 +12,13 @@ Contract (the server side is any process that serves it):
          200 {"hits": [{"name", "path", "line", "signature"}]}
          409 the server holds a different root      -> answer locally
          503 {"error": "loading"} the graph is warming -> poll until the deadline
+         503 {"error": "deferred", "reason"} the server put its load off -> Deferred
 
-Every failure returns ``None`` and the caller loads the index itself, so awgraph still
-works alone. Never raises.
+``None`` means "no shared server can answer" (absent, another root, an error) and the
+caller loads the index itself, so awgraph still works alone. A ``Deferred`` means the
+server is there and declined to load the index right now (host memory pressure, or
+another full load of the same root), and the caller must NOT load it locally instead:
+that is the load the server just refused to make. Never raises.
 
 Environment:
     AWGRAPH_SHARED=0          never ask a shared server (always load locally)
@@ -27,13 +31,27 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Union
 
 DEFAULT_URL = "http://127.0.0.1:9001"
 #: Header and file the local daemon accepts as proof the caller is this machine's user.
 LOCAL_TOKEN_HEADER = "X-Aither-Local-Token"
 #: Answers served by a shared server in this process (tests assert on it).
 ANSWERS = {"shared": 0}
+
+
+class Deferred:
+    """The shared server is up and put off loading the graph; ``reason`` says why."""
+
+    def __init__(self, reason: str):
+        self.reason = reason or "the shared graph server deferred its load"
+
+    def __repr__(self) -> str:
+        return "Deferred(%r)" % self.reason
+
+
+#: What ``query`` returns: hits, a deferral, or None (answer locally).
+Answer = Optional[Union[List[dict], Deferred]]
 
 
 def enabled() -> bool:
@@ -64,8 +82,9 @@ def _same_root(a: str, b: str) -> bool:
 
 
 def query(root: str, text: str, k: int,
-          sleep: Callable[[float], None] = time.sleep) -> Optional[List[dict]]:
-    """Hits for ``text`` from the shared server, or ``None`` to answer locally.
+          sleep: Callable[[float], None] = time.sleep) -> Answer:
+    """Hits for ``text`` from the shared server, a ``Deferred``, or ``None`` to answer
+    locally.
 
     Hit paths are returned RELATIVE to ``root`` when they sit under it.
     """
@@ -96,10 +115,17 @@ def query(root: str, text: str, k: int,
                     ANSWERS["shared"] += 1
                     return [_relative(h, root) for h in hits if isinstance(h, dict)]
                 body = _json(resp)
-                if resp.status_code == 503 and body.get("error") == "loading" \
-                        and time.monotonic() < deadline:
-                    sleep(2.0)
-                    continue
+                if resp.status_code == 503 and (body.get("deferred")
+                                                or body.get("error") == "deferred"):
+                    return Deferred(str(body.get("reason") or ""))
+                if resp.status_code == 503 and body.get("error") == "loading":
+                    if time.monotonic() < deadline:
+                        sleep(2.0)
+                        continue
+                    # Still warming past the wait: the server is spending the memory
+                    # right now, so a second local load is the worst answer.
+                    return Deferred("the shared graph is still loading after %.0fs"
+                                    % _wait_s())
                 return None
     except Exception:  # noqa: BLE001 - any transport failure means "answer locally"
         return None
