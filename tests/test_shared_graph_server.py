@@ -196,3 +196,18 @@ def test_an_older_server_reporting_a_deferral_as_502_is_still_a_deferral(server,
                             "AwgraphUnavailable: deferred: host commit 94% >= 85%"})]
     got = shared.query(str(tmp_path), "x", 5)
     assert isinstance(got, shared.Deferred) and got.reason.startswith("deferred: host")
+
+
+def test_a_server_that_times_out_is_a_deferral_not_a_local_load(server, tmp_path,
+                                                                monkeypatch):
+    import httpx
+
+    real_post = httpx.Client.post
+
+    def slow_post(self, *a, **k):
+        raise httpx.ReadTimeout("read timed out")
+
+    monkeypatch.setattr(httpx.Client, "post", slow_post)
+    got = shared.query(str(tmp_path), "x", 5)
+    monkeypatch.setattr(httpx.Client, "post", real_post)
+    assert isinstance(got, shared.Deferred) and "did not answer" in got.reason

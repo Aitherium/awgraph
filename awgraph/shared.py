@@ -132,7 +132,14 @@ def query(root: str, text: str, k: int,
                     return Deferred("the shared graph is still loading after %.0fs"
                                     % _wait_s())
                 return None
-    except Exception:  # noqa: BLE001 - any transport failure means "answer locally"
+    except httpx.TimeoutException as exc:
+        if isinstance(exc, httpx.ConnectTimeout):
+            return None  # nothing is listening: no shared server
+        # The server is up and did not answer in time: it is loading or busy, and
+        # a second load here is the worst answer under that pressure.
+        return Deferred("the shared graph server did not answer in time (%s)"
+                        % type(exc).__name__)
+    except Exception:  # noqa: BLE001 - any other transport failure means "answer locally"
         return None
 
 

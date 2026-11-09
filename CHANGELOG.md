@@ -5,6 +5,27 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.20] - 2026-11-08
+
+### Added
+- `.awgraphignore` at the indexed root (gitignore syntax: `!`, a trailing `/`, a
+  leading `/` anchors, `**`) keeps trees out of the code graph that `.gitignore`
+  cannot: scratch dirs, backups, vendored mirrors. On the host repo 35,545 chunks.
+- Host-wide admission: when a `host_budget.py` gate is found (`AWGRAPH_HOST_BUDGET`,
+  or beside the package in a monorepo checkout), `awgraph index` and a query
+  worker's load take a ticket from it (declared 4 GB / 3.5 GB) instead of awgraph's
+  own commit check, so the host keeps ONE admission ledger; the gate's watchdog may
+  shed them at its kill line. Without a gate the 1.4.19 commit check still applies.
+
+### Changed
+- `CodeChunk` is slotted: every field lived in an instance dict, ~1.5 KB per chunk
+  (~680 MB on 533k chunks). Extra attributes still work (a lazy `__dict__`); the
+  chunk cache stores plain rows, so caches load across the change.
+- Embedding vectors get a float32 `.npy` sidecar read with mmap
+  (`codegraph_embeddings.pkl.<n>.npy` + `.ids.json`, stamped with the pickle's mtime
+  and size). The first hydrate of an older cache reads the pickle once and writes
+  the sidecar; every later one maps it (on the test root: +233 MB -> +2 MB).
+
 ## [1.4.19] - 2026-11-08
 
 ### Fixed

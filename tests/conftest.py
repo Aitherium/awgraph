@@ -21,6 +21,13 @@ def _isolated_awgraph_cache(tmp_path_factory, monkeypatch):
     # Host admission off: a developer box near its commit limit would otherwise defer
     # every `awgraph index` a test runs. The admission tests opt back in.
     monkeypatch.setenv("AWGRAPH_ADMIT_COMMIT_PCT", "0")
+    # ...and no host-wide budget gate either (the monorepo's would be found beside this
+    # package and judge the live host). Tests of that path pass a fake gate.
+    monkeypatch.setenv("HOST_BUDGET", "off")
+    monkeypatch.setenv("AWGRAPH_HOST_BUDGET", str(cache / "no-host-budget.py"))
+    from awgraph import _admit
+
+    _admit._HOST_BUDGET.clear()
     # No test may reach a real host-shared graph server (a live daemon on this box
     # would answer for the wrong tree). Tests of that path opt back in.
     monkeypatch.setenv("AWGRAPH_SHARED", "0")

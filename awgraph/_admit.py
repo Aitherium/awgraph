@@ -102,6 +102,87 @@ def admit(what: str, pct_fn: Callable[[], Optional[float]] = host_commit_pct,
         pct, limit, COMMIT_ENV, what)
 
 
+#: Path of an external host-memory gate module (a single ``host_budget.py`` exposing
+#: ``acquire(gb, label, wait_s=...) -> (holder | None, why)``). When it is found, every
+#: heavy job on the host shares ONE admission ledger and awgraph's own commit check
+#: steps aside; without it (a stranger's machine) the commit check above is the gate.
+HOST_BUDGET_ENV = "AWGRAPH_HOST_BUDGET"
+#: Declared cost of each full load, in GB (measured 2026-11-08, after the 1.4.19 cuts).
+GB_WORKER_LOAD = 3.5
+GB_INDEX = 4.0
+_HOST_BUDGET: dict = {}
+
+
+def _host_budget_path() -> Optional[str]:
+    env = os.environ.get(HOST_BUDGET_ENV, "").strip()
+    if env:
+        return env if os.path.isfile(env) else None
+    # Installed from a monorepo checkout: <repo>/<pkg-root>/packages/awgraph/awgraph/
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.normpath(os.path.join(here, "..", "..", "..", "lib", "core",
+                                         "host_budget.py"))
+    return cand if os.path.isfile(cand) else None
+
+
+def host_budget_module():
+    """The host gate module, loaded once by path, or None."""
+    if "mod" in _HOST_BUDGET:
+        return _HOST_BUDGET["mod"]
+    mod = None
+    path = _host_budget_path()
+    if path:
+        import importlib.util
+
+        try:
+            mod = sys.modules.get("aither_host_budget")
+            if mod is None:
+                spec = importlib.util.spec_from_file_location("aither_host_budget", path)
+                if spec is not None and spec.loader is not None:
+                    mod = importlib.util.module_from_spec(spec)
+                    sys.modules["aither_host_budget"] = mod
+                    spec.loader.exec_module(mod)
+        except Exception as exc:  # noqa: BLE001 -- a broken gate falls back, loudly
+            logger.warning("awgraph: host budget at %s not loadable: %s", path, exc)
+            sys.modules.pop("aither_host_budget", None)
+            mod = None
+    _HOST_BUDGET["mod"] = mod
+    return mod
+
+
+class _NoHolder:
+    """What admit_job hands back when awgraph's own commit check admitted the job."""
+
+    def start(self, *a: object, **kw: object) -> "_NoHolder":
+        return self
+
+    def release(self) -> None:
+        return None
+
+
+def admit_job(what: str, gb: float, label: str,
+              pct_fn: Callable[[], Optional[float]] = host_commit_pct,
+              budget: object = "auto") -> "tuple[str, object]":
+    """("", holder) when ``what`` may start, else ("deferred: ...", None).
+
+    With a host gate present the decision is the gate's (one ledger for the host);
+    "cannot judge" from it defers too, since a full load is exactly what an unreadable
+    host must not start. ``holder.release()`` when the job ends; ``holder.start(...)``
+    hands the job to the gate's watchdog.
+    """
+    mod = host_budget_module() if budget == "auto" else budget
+    if mod is not None:
+        try:
+            holder, why = mod.acquire(gb, label, wait_s=0)
+        except Exception as exc:  # noqa: BLE001 -- the fallback below still gates
+            logger.warning("awgraph: host budget failed (%s); using the commit check", exc)
+        else:
+            if holder is None:
+                return "deferred: host budget: %s -- %s not started" % (why, what), None
+            return "", holder
+    why = admit(what, pct_fn=pct_fn)
+    return (why, None) if why else ("", _NoHolder())
+
+
 class FullLoadLock:
     """An exclusive, non-blocking, crash-safe lock on one root's full load."""
 

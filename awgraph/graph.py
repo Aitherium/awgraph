@@ -495,8 +495,23 @@ class ChunkType(str, Enum):
     SECTION = "section"
 
 
-@dataclass
-class CodeChunk:
+class _ChunkSlots:
+    """Storage the slotted :class:`CodeChunk` keeps beside its fields.
+
+    ``_embedding``/``_emb_source`` back the ``embedding`` property; ``__dict__`` stays
+    available, created only when something sets an attribute that is not a field, so a
+    caller that hangs an extra attribute on a chunk keeps working.
+    """
+
+    __slots__ = ("__dict__", "__weakref__", "_embedding", "_emb_source")
+
+
+#: slots=True (2026-11-08): with 37 fields and no slots every chunk carried a full
+#: instance dict, ~1.5 KB of the ~3.4 KB a loaded chunk cost (about 640 MB of the
+#: host repo's 533k chunks). The chunk cache pickles plain row dicts, not CodeChunk
+#: objects, so caches written before and after this change load either way.
+@dataclass(slots=True)
+class CodeChunk(_ChunkSlots):
     """
     A semantic chunk of Python code with full relationship data.
 
@@ -615,10 +630,10 @@ class CodeChunk:
 # in this file and in external readers (codegraph_api stats, service harvest).
 
 def _codechunk_embedding_get(self):
-    vec = self.__dict__.get("_embedding")
+    vec = getattr(self, "_embedding", None)
     if vec is not None:
         return vec
-    src = self.__dict__.get("_emb_source")
+    src = getattr(self, "_emb_source", None)
     if src is not None:
         _mat, _row = src
         try:
@@ -629,16 +644,16 @@ def _codechunk_embedding_get(self):
 
 
 def _codechunk_embedding_set(self, value) -> None:
-    self.__dict__["_embedding"] = value
+    self._embedding = value
     # A direct assignment supersedes any matrix-row binding — without this a
     # stale row would shadow `embedding = None` (e.g. embed_chunks force=True).
-    self.__dict__.pop("_emb_source", None)
+    self._emb_source = None
 
 
 def _codechunk_bind_matrix_row(self, mat, row: int) -> None:
     """Release the boxed vector; reads now rehydrate from the matrix row."""
-    self.__dict__["_embedding"] = None
-    self.__dict__["_emb_source"] = (mat, row)
+    self._embedding = None
+    self._emb_source = (mat, row)
 
 
 CodeChunk.embedding = property(_codechunk_embedding_get, _codechunk_embedding_set)
@@ -1529,7 +1544,10 @@ async def discover_files(root: Path, extensions=None, exclude_dirs=None):
 
     exts = multilang.index_extensions(only=extensions)
     excludes = default_exclude_dirs() if exclude_dirs is None else list(exclude_dirs)
-    return await _discover(root, exts, excludes)
+    files, elapsed = await _discover(root, exts, excludes)
+    from awgraph import ignorefile  # noqa: PLC0415 - tiny, kept beside its one caller
+
+    return ignorefile.apply(Path(root), files), elapsed
 
 
 async def discover_python_files(root: Path) -> Tuple[List[Path], float]:
@@ -3274,6 +3292,7 @@ class CodeGraph(BaseFacultyGraph):
             # silently discard every embedding computed so far.
             os.replace(tmp, cache_path)
             _write_pickle_hmac(cache_path)
+            _write_vector_sidecar(cache_path, cached)
             return os.path.getsize(cache_path) / (1024 * 1024)
 
         return await asyncio.to_thread(_write)
@@ -4629,7 +4648,7 @@ class CodeGraph(BaseFacultyGraph):
             # Only vectors still boxed ON the chunk; matrix-folded chunks are
             # covered by the matrix nbytes below (and an ndarray would be
             # ambiguous under plain truthiness anyway)
-            _emb = chunk.__dict__.get("_embedding")
+            _emb = getattr(chunk, "_embedding", None)
             if _emb is not None:
                 total_bytes += len(_emb) * 4  # float32 rows
         # Body cache
@@ -5065,12 +5084,31 @@ def _save_chunk_cache(cg: "CodeGraph", root_path: str):
 
     cache_path = _get_data_path(root_path, "codegraph_chunks.pkl")
     try:
-        with open(cache_path, "wb") as f:
+        # Write beside, then swap: written in place, a reader that opened the cache
+        # mid-write (a query worker, `awgraph query`) unpickled a truncated file --
+        # "Chunk cache corrupted: Ran out of input", measured live 2026-11-08 -- and
+        # a crash mid-write destroyed the only index. The HMAC goes the same way.
+        tmp = cache_path + ".%d.tmp" % os.getpid()
+        with open(tmp, "wb") as f:
             pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
-        _write_pickle_hmac(cache_path)
+            f.flush()
+            os.fsync(f.fileno())  # on disk before the swap, so a crash cannot expose it
+        hmac_tmp = tmp + ".hmac"
+        with open(hmac_tmp, "w", encoding="utf-8") as f:
+            f.write(_compute_file_hmac(tmp))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, cache_path)
+        os.replace(hmac_tmp, cache_path + ".hmac")
         logger.info(f"[CodeGraph] Saved {len(cache['chunks'])} chunks to cache")
     except Exception as e:
         logger.warning(f"[CodeGraph] Failed to save chunk cache: {e}")
+        for leftover in (cache_path + ".%d.tmp" % os.getpid(),
+                         cache_path + ".%d.tmp.hmac" % os.getpid()):
+            try:
+                os.remove(leftover)
+            except OSError as rm_err:  # absent is the normal case
+                logger.debug(f"[CodeGraph] no temp to remove: {rm_err}")
         return
 
     # The edge sidecar is a projection of what was just written, so it is built
@@ -5100,6 +5138,92 @@ def _embedding_cache_path() -> str:
     return _get_data_path(str(Path(__file__).parent.parent.parent), "codegraph_embeddings.pkl")
 
 
+#: Vector sidecar format: ``<cache>.npy`` (float32 [n, dim]) + ``<cache>.ids.json``.
+VECTOR_SIDECAR_VERSION = 1
+
+
+def _sidecar_meta(cache_path: str) -> str:
+    return cache_path + ".ids.json"
+
+
+def _source_stamp(path: str) -> List[float]:
+    st = os.stat(path)
+    return [st.st_mtime, float(st.st_size)]
+
+
+def _write_vector_sidecar(cache_path: str, cached: Dict[str, Any]) -> bool:
+    """Write ``cached`` (id -> vector) as a float32 matrix beside the pickle.
+
+    The pickle holds boxed Python floats: 282k x 1024 on the host repo was a 2.6 GB
+    file and ~9 GB transient to read (2026-11-08). The sidecar is read with mmap, so a
+    hydrate costs pages actually touched. Stamped with the pickle's (mtime, size): a
+    pickle written by anything that does not know the sidecar makes it stale, and a
+    stale sidecar is never read. Never raises; False when not written.
+    """
+    if not _HAS_NUMPY or not cached:
+        return False
+    try:
+        dims: Dict[int, int] = defaultdict(int)
+        for vec in cached.values():
+            if vec is not None:
+                dims[len(vec)] += 1
+        if not dims:
+            return False
+        dim = max(dims, key=lambda d: dims[d])
+        ids = [cid for cid, vec in cached.items() if vec is not None and len(vec) == dim]
+        # A NEW file name per write: a reader holding the previous matrix mapped keeps
+        # it (Windows cannot replace a mapped file); older matrices are removed when free.
+        name = "%s.%d.npy" % (os.path.basename(cache_path), time.time_ns())
+        npy = os.path.join(os.path.dirname(cache_path), name)
+        mat = np.lib.format.open_memmap(npy + ".tmp", mode="w+",
+                                        dtype=np.float32, shape=(len(ids), dim))
+        for i, cid in enumerate(ids):
+            mat[i] = np.asarray(cached[cid], dtype=np.float32)
+        mat.flush()
+        del mat
+        os.replace(npy + ".tmp", npy)
+        meta = _sidecar_meta(cache_path)
+        with open(meta + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump({"version": VECTOR_SIDECAR_VERSION, "dim": dim, "ids": ids,
+                       "file": name, "source": _source_stamp(cache_path)}, fh)
+        os.replace(meta + ".tmp", meta)
+        prefix = os.path.basename(cache_path) + "."
+        for old in os.listdir(os.path.dirname(cache_path) or "."):
+            if old.startswith(prefix) and old.endswith(".npy") and old != name:
+                try:
+                    os.remove(os.path.join(os.path.dirname(cache_path), old))
+                except OSError as e:  # mapped by a running reader: next write retries
+                    logger.debug(f"[CodeGraph] old vector sidecar kept: {e}")
+        return True
+    except Exception as e:  # noqa: BLE001 - an accelerator, never fatal
+        logger.warning(f"[CodeGraph] vector sidecar not written: {e}")
+        return False
+
+
+def _load_vector_sidecar(cache_path: str):
+    """``(ids, matrix)`` from a CURRENT sidecar (matrix memory-mapped), else None."""
+    if not _HAS_NUMPY:
+        return None
+    try:
+        with open(_sidecar_meta(cache_path), encoding="utf-8") as fh:
+            info = json.load(fh)
+        if info.get("version") != VECTOR_SIDECAR_VERSION:
+            return None
+        if info.get("source") != _source_stamp(cache_path):
+            return None  # the pickle changed after the sidecar was written
+        name = os.path.basename(str(info.get("file") or ""))
+        if not name:
+            return None
+        mat = np.load(os.path.join(os.path.dirname(cache_path), name), mmap_mode="r",
+                      allow_pickle=False)
+        ids = info.get("ids") or []
+        if mat.ndim != 2 or mat.shape[0] != len(ids):
+            return None
+        return ids, mat
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def _hydrate_embeddings(cg: "CodeGraph", cache_path: Optional[str] = None) -> int:
     """Attach persisted vectors to the chunks already loaded on ``cg``.
 
@@ -5111,6 +5235,18 @@ def _hydrate_embeddings(cg: "CodeGraph", cache_path: Optional[str] = None) -> in
     path = cache_path or _embedding_cache_path()
     if not cg.chunks or not os.path.exists(path):
         return 0
+    side = _load_vector_sidecar(path)
+    if side is not None:
+        ids, mat = side
+        applied = 0
+        for row, chunk_id in enumerate(ids):
+            chunk = cg.chunks.get(chunk_id)
+            if chunk is not None and chunk.embedding is None:
+                chunk.embedding = mat[row]  # a memory-mapped row: no copy, no boxing
+                applied += 1
+        if applied:
+            cg._has_embeddings_cached = True
+        return applied
     if not _verify_pickle_hmac(path):
         logger.warning("[CodeGraph] Embedding cache HMAC invalid — queries stay keyword-only")
         return 0
@@ -5129,6 +5265,8 @@ def _hydrate_embeddings(cg: "CodeGraph", cache_path: Optional[str] = None) -> in
                 applied += 1
     if applied:
         cg._has_embeddings_cached = True
+    # An older cache: write the mmap sidecar now so this is the last boxed-float read.
+    _write_vector_sidecar(path, cached)
     return applied
 
 

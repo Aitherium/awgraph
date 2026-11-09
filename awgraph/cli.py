@@ -109,18 +109,22 @@ async def cmd_index(args: argparse.Namespace) -> int:
     if not os.path.isdir(root):
         return _fail("not a directory: " + root)
 
-    from awgraph._admit import FullLoadLock, admit
+    from awgraph._admit import GB_INDEX, FullLoadLock, admit_job
 
     # A full index costs GBs: it never starts on a host already near its commit limit,
     # nor beside another full load of the same root (a second index, a query worker).
     # Either is a SKIP, exit 0 -- the next scheduled run resumes -- printed on a line
     # starting with SKIPPED_PREFIX so a wrapper does not record it as a build.
-    why = admit("awgraph index")
+    why, holder = admit_job("awgraph index", GB_INDEX, "awgraph-index")
     lock = FullLoadLock(root, "index")
-    why = why or lock.acquire()
+    if not why:
+        why = lock.acquire()
+        if why and holder is not None:
+            holder.release()
     if why:
         print(SKIPPED_PREFIX + why + "; next run resumes")
         return EXIT_OK
+    holder.start(self_mode=True)  # the host gate's watchdog may shed this run at its kill line
     try:
         t0 = time.perf_counter()
         graph, _ = await _open_graph(root, build=True)
@@ -133,6 +137,7 @@ async def cmd_index(args: argparse.Namespace) -> int:
         _save_chunk_cache(graph, root)
     finally:
         lock.release()
+        holder.release()
     print("indexed {0:,} chunks from {1} in {2:.1f}s".format(n, root, elapsed))
     print("cache: " + os.path.dirname(_get_data_path(root, "x")))
     return EXIT_OK
