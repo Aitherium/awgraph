@@ -5,6 +5,16 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.18] - 2026-11-08
+
+### Added
+- `awgraph query` and the MCP `code_search` tool ask a host-shared graph server
+  first (`awgraph.shared`: `GET /v1/codegraph/info`, `POST /v1/codegraph/query`,
+  default `http://127.0.0.1:9001`). When a long-running agent daemon already holds a
+  warm graph for the same root, the query is answered without loading the index in
+  the calling process. Any failure, a different root, or no server falls back to the
+  local load. `--local` or `AWGRAPH_SHARED=0` opts out.
+
 ## [1.4.17] - 2026-11-07
 
 ### Fixed

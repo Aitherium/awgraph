@@ -172,6 +172,21 @@ def _edges_from_graph(graph, symbol: str, edge: str, root: str) -> str:
     return text
 
 
+def format_shared_rows(rows: list) -> str:
+    """``code_search`` text for hits a host-shared graph server returned.
+
+    The server sends no call edges; ``code_callers`` / ``code_calls`` answer those
+    from the sidecar store without loading the index.
+    """
+    if not rows:
+        return ("No matches. The index exists, so this is a real negative answer "
+                "rather than a missing index.")
+    return "\n".join(json.dumps({
+        "name": r["name"], "type": r["type"], "file": r["path"], "line": r["line"],
+        "signature": (r["signature"] or "").strip()[:300],
+    }) for r in rows)
+
+
 def _no_index(root: str) -> str:
     return (f"No index for {root}. Run the `code_index` tool on this path first "
             "(one-time per repository; cached on disk outside the repo). Not "
@@ -241,6 +256,13 @@ def build_server():
             limit: Maximum results.
         """
         root = os.path.abspath(path)
+        import asyncio  # noqa: PLC0415
+
+        from awgraph import shared  # noqa: PLC0415
+
+        rows = await asyncio.to_thread(shared.query, root, query, limit)
+        if rows is not None:
+            return format_shared_rows(rows)
         graph, ok = await _open(root, build=False)
         if not ok:
             return _no_index(root)

@@ -18,4 +18,7 @@ import pytest
 def _isolated_awgraph_cache(tmp_path_factory, monkeypatch):
     cache = tmp_path_factory.mktemp("awgraph-cache")
     monkeypatch.setenv("AWGRAPH_CACHE_DIR", str(cache))
+    # No test may reach a real host-shared graph server (a live daemon on this box
+    # would answer for the wrong tree). Tests of that path opt back in.
+    monkeypatch.setenv("AWGRAPH_SHARED", "0")
     yield cache

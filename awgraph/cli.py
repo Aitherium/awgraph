@@ -123,14 +123,22 @@ async def cmd_index(args: argparse.Namespace) -> int:
 
 async def cmd_query(args: argparse.Namespace) -> int:
     root = os.path.abspath(args.path)
-    graph, ok = await _open_graph(root, build=False)
-    if not ok:
-        return _fail("no index for " + root + " — run: awgraph index " + args.path)
     text = args.text
     if getattr(args, "hints", None):
         extra = " ".join(h.strip() for h in args.hints.split(",") if h.strip())
         if extra:
             text = f"{text} {extra}"
+    if not getattr(args, "local", False):
+        # One warm graph per host: a shared server that already holds this root
+        # answers without this process loading the index (gigabytes per call).
+        from awgraph import shared
+
+        rows = await asyncio.to_thread(shared.query, root, text, args.k)
+        if rows is not None:
+            return _print_rows(rows, args.json)
+    graph, ok = await _open_graph(root, build=False)
+    if not ok:
+        return _fail("no index for " + root + " — run: awgraph index " + args.path)
     chunks = await graph.hybrid_query(text, max_results=args.k)
     chunks = await _tokengate_filter(text, chunks)
     return _print_rows([_chunk_row(c, root) for c in chunks], args.json)
@@ -379,6 +387,10 @@ def build_parser() -> argparse.ArgumentParser:
              "0.571 -> 0.857 when the caller's hints are supplied. Appended, never used "
              "as a filter: a filter would EXCLUDE the right answer on a wrong hint, "
              "whereas appending only re-weights.")
+    p_query.add_argument(
+        "--local", action="store_true",
+        help="load the index in this process; never ask a host-shared graph server "
+             "(same as AWGRAPH_SHARED=0)")
     _add_common(p_query)
     p_query.set_defaults(func=cmd_query)
 
