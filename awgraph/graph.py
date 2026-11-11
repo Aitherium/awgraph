@@ -620,6 +620,57 @@ class CodeChunk(_ChunkSlots):
             "complexity": self.complexity,
         }
 
+    def entity_keys(self, root: Optional[str] = None) -> Dict[str, str]:
+        """Canonical cross-component keys for this chunk (see chunk_entity_keys).
+        A method, not a field: it is derived on demand and never persisted."""
+        return chunk_entity_keys(self, root)
+
+
+def _host_entity_keys():
+    """The host application's canonical-key module, or None when standalone.
+
+    awgraph does not define what a cross-component key is; a host that has such a
+    scheme exposes it as ``lib.core.entity_key`` and results gain the keys. Outside
+    that host the import fails, this returns None, and every result is exactly what
+    it was -- a derived join aid must never be a dependency.
+    """
+    try:
+        from lib.core import entity_key as mod
+    except ImportError:
+        return None
+    return mod if hasattr(mod, "path_entity_key") else None
+
+
+def chunk_entity_keys(chunk: Any, root: Optional[str] = None) -> Dict[str, str]:
+    """Canonical keys for a chunk: ``{"symbol"|"file", "file", "dir"}``, or ``{}``.
+
+    DERIVED at read time from ``source_path`` + ``name`` -- nothing is stored, the
+    chunk id, the pickle cache and the SQLite schema are untouched, and no re-index is
+    needed. ``root`` is the index root a relative ``source_path`` is relative to; a
+    relative path with no root is not keyed, because it could be relative to anything.
+    """
+    host = _host_entity_keys()
+    src = str(getattr(chunk, "source_path", "") or "")
+    if host is None or not src:
+        return {}
+    if not root and not host.is_absolute_path(src):
+        return {}
+    file_key = host.path_entity_key("file", src, base=root or None)
+    if not file_key:
+        return {}
+    rel = file_key.split(":", 1)[1]
+    keys = {"file": file_key}
+    dir_key = host.path_entity_key("dir", rel.rpartition("/")[0] or ".")
+    if dir_key:
+        keys["dir"] = dir_key
+    kind = getattr(getattr(chunk, "chunk_type", None), "value", "")
+    name = str(getattr(chunk, "name", "") or "")
+    if kind in ("class", "function", "method", "symbol") and name:
+        symbol_key = host.path_entity_key("symbol", rel, qualname=name)
+        if symbol_key:
+            keys["symbol"] = symbol_key
+    return keys
+
 
 # ── CodeChunk.embedding property (memory audit 2026-07) ──────────────────────
 # Attached AFTER the dataclass is built so the generated __init__ signature is

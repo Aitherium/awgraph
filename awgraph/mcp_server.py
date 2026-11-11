@@ -79,7 +79,11 @@ def _fmt(chunks: list, root: str) -> str:
     if not chunks:
         return ("No matches. The index exists, so this is a real negative answer "
                 "rather than a missing index.")
-    return "\n".join(json.dumps({
+    return "\n".join(json.dumps(_row(c, root)) for c in chunks)
+
+
+def _row(c: Any, root: str) -> dict:
+    row = {
         "name": getattr(c, "name", ""),
         "type": getattr(getattr(c, "chunk_type", None), "value", ""),
         "file": _rel(str(getattr(c, "source_path", "") or ""), root),
@@ -87,7 +91,16 @@ def _fmt(chunks: list, root: str) -> str:
         "signature": (getattr(c, "signature", "") or "").strip()[:300],
         "calls": list(getattr(c, "calls", []) or [])[:15],
         "called_by": list(getattr(c, "called_by", []) or [])[:15],
-    }) for c in chunks)
+    }
+    # Present only inside a host that defines canonical keys; standalone output is
+    # unchanged. Derived from the path at read time, never stored.
+    from awgraph.graph import chunk_entity_keys
+
+    keys = chunk_entity_keys(c, root)
+    key = keys.get("symbol") or keys.get("file")
+    if key:
+        row["entity_key"] = key
+    return row
 
 
 async def resolve_edges(symbol: str, path: str, edge: str) -> str:
