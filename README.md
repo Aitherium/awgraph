@@ -200,6 +200,16 @@ embedding backend `hybrid_query` silently falls back to keyword scoring and
 still returns ten confident-looking results, so "is the semantic half actually
 on?" is a question you should never have to answer by reading the source.
 
+It also prints `embedding space: index = <model> <width> | active = <model> <width>
+| match: yes|NO|unknown`. An embedding pass records the model it ran with beside
+the vectors; a query embedded by a different model (or to a different width) is
+**refused** with a message naming both, not answered — vectors from two models
+are not comparable, and keyword hits returned in their place would look like an
+answer. The remedy is a rebuild: `CodeGraph.embed_chunks(force=True)`. An index
+written before the record existed reads as `unknown` and is searched as before.
+If `AITHER_EMBED_SPACE` is set (`nomic` or `aither-code-embed`), the embedder's
+model name follows it; unset, nothing changes.
+
 ## Use it from a coding agent (MCP)
 
 ```

@@ -35,6 +35,29 @@ from awgraph.logging import get_logger
 
 logger = get_logger("CodeGraphRegistry")
 
+_REFUSAL_LOGGED_AT: Dict[str, float] = {}
+
+
+def _log_root_failure(label: str, exc: BaseException) -> None:
+    """Log why one root contributed nothing to a multi-root query.
+
+    An embedding-space refusal is a standing fault of that root (its index needs
+    a rebuild), not a flaky query: at debug the root simply vanished from every
+    answer. WARNING, at most once a minute per root; anything else stays debug.
+    """
+    import time
+
+    from awgraph.space import EmbeddingSpaceMismatch
+
+    if isinstance(exc, EmbeddingSpaceMismatch):
+        now = time.monotonic()
+        last = _REFUSAL_LOGGED_AT.get(label)
+        if last is None or now - last >= 60.0:
+            _REFUSAL_LOGGED_AT[label] = now
+            logger.warning(f"Root {label} was NOT searched: {exc}")
+            return
+    logger.debug(f"Query failed for root {label}: {exc}")
+
 # Cache base — use standard ~/.awgraph or /tmp
 try:
     from pathlib import Path
@@ -334,7 +357,7 @@ class CodeGraphRegistry:
                 if hits:
                     results.append((label, hits))
             except Exception as e:
-                logger.debug(f"Query failed for root {label}: {e}")
+                _log_root_failure(label, e)
 
         return results
 
@@ -369,7 +392,7 @@ class CodeGraphRegistry:
                 if hits:
                     results.append((label, hits))
             except Exception as e:
-                logger.debug(f"Query failed for root {label}: {e}")
+                _log_root_failure(label, e)
 
         return results
 

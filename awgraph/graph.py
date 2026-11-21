@@ -73,6 +73,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from awgraph import jscalls as _jscalls
 from awgraph import plugins as _plugins
+from awgraph import space as _space
 from awgraph.base import BaseFacultyGraph, GraphSyncConfig
 from awgraph.degradation import SubsystemTier
 
@@ -189,6 +190,15 @@ ELASTIC_REASON = _ELASTIC_REASON_DEFAULT   # Deep: analysis, complex reasoning
 # bind-mounted (toggle without rebuild); the is_query call-site wiring is BAKED.
 _CODE_EMBED_URL = os.environ.get("AITHER_CODEGRAPH_EMBED_URL", "").strip()
 _CODE_EMBED_MODEL = os.environ.get("AITHER_CODEGRAPH_EMBED_MODEL", "").strip()
+# The platform declares ONE embedding space in `AITHER_EMBED_SPACE` (see
+# awgraph/space.py). When it is set, the model names here follow it: an empty
+# or retired (nomic, in the code-embed space) model id becomes the space's
+# model. Unset keeps every default exactly as it was. The URL is never
+# invented from the space: a lane is only dialled when somebody configured one.
+_EMBED_SPACE = _space.declared_space()
+_DEFAULT_EMBED_MODEL = _space.platform_model(_EMBED_SPACE)
+if _EMBED_SPACE is not None:
+    _CODE_EMBED_MODEL = _space.resolve_model(_CODE_EMBED_MODEL, _EMBED_SPACE)
 _CODE_QUERY_PREFIX = os.environ.get(
     "AITHER_CODEGRAPH_QUERY_PREFIX",
     "Represent this query for searching relevant code: ",
@@ -289,8 +299,184 @@ async def _code_embed_split(client, payload_texts: List[str]) -> List[Optional[l
     return [None] * n
 
 
+_WARNED_AT: Dict[str, float] = {}
+_WARN_EVERY_S = 60.0
+
+
+def _warn_throttled(key: str, message: str, every: float = _WARN_EVERY_S) -> None:
+    """WARNING the first time ``key`` happens and at most once per ``every``
+    seconds after (debug in between). ``every=0`` means once per process."""
+    now = time.monotonic()
+    last = _WARNED_AT.get(key)
+    if last is None or (every > 0 and now - last >= every):
+        _WARNED_AT[key] = now
+        logger.warning(message)
+    else:
+        logger.debug(message)
+
+
+def _active_space() -> Dict[str, Any]:
+    """The space a text would be embedded in RIGHT NOW: model, width, prefix scheme.
+
+    ``dim`` is None when the width cannot be known without a request (a custom
+    model, or a host engine with no declared space); the measured width of the
+    query vector is checked against the index in that case.
+    """
+    if _code_embed_enabled():
+        model = _CODE_EMBED_MODEL
+        lane, prefix = "code-service", _space.prefix_scheme(_CODE_QUERY_PREFIX)
+    elif _HAS_EMBEDDING_ENGINE:
+        # The host engine picks its own model. With a declared space that model
+        # is the space's; without one awgraph cannot name it and says so.
+        model = _DEFAULT_EMBED_MODEL if _EMBED_SPACE else _space.HOST_ENGINE_MODEL
+        lane, prefix = "host-engine", _space.prefix_scheme("")
+    else:
+        return {"model": None, "dim": None, "prefix_scheme": None,
+                "lane": "none", "space": _EMBED_SPACE}
+    return {"model": model, "dim": _space.known_dim(model, _EMBED_SPACE),
+            "prefix_scheme": prefix, "lane": lane, "space": _EMBED_SPACE}
+
+
+def _index_dim(cg: Any) -> Optional[int]:
+    """Width of the vectors an index holds (the matrix, else the first vector)."""
+    mat = getattr(cg, "_embedding_matrix", None)
+    if mat is not None and getattr(mat, "ndim", 0) == 2:
+        return int(mat.shape[1])
+    chunks = getattr(cg, "chunks", {})
+    try:
+        # no copy: with vectors loaded the first chunk usually answers
+        for chunk in chunks.values():
+            emb = getattr(chunk, "embedding", None)
+            if emb is not None:
+                return len(emb)
+    except RuntimeError:  # a live reconcile resized the dict mid-walk
+        for chunk in list(chunks.values()):
+            emb = getattr(chunk, "embedding", None)
+            if emb is not None:
+                return len(emb)
+    return None
+
+
+def _width_mismatch(cg: Any, index_dim: int, query_dim: int,
+                    action: str = "search") -> "_space.EmbeddingSpaceMismatch":
+    index = getattr(cg, "_index_space", None) or {}
+    active = _active_space()
+    return _space.EmbeddingSpaceMismatch(_space.mismatch_message(
+        {"model": index.get("model") or "an unrecorded model", "dim": index_dim},
+        {"model": active.get("model") or "an unnamed embedder", "dim": query_dim},
+        "width {0}-d != {1}-d".format(index_dim, query_dim), action))
+
+
+def _refuse_space_mismatch(cg: Any, query_dim: Optional[int] = None) -> None:
+    """Raise EmbeddingSpaceMismatch when a search would cross embedding spaces.
+
+    Two proofs, either is enough: the index's space record names a different
+    model or width than the active lane, or the query vector in hand is not as
+    wide as the index. An index with no record ("unknown space") passes the
+    first and is still held to the second.
+
+    Do NOT reach for a registered bridge (index space -> active space) here: a
+    bridge is for identity joins only -- measured, a bridged top-10 overlaps
+    the native top-10 by 37-39%. The remedy for a mismatch is a rebuild.
+    """
+    index = getattr(cg, "_index_space", None)
+    active = _active_space()
+    verdict, reason = _space.compare(index, active)
+    if verdict == _space.MISMATCH:
+        raise _space.EmbeddingSpaceMismatch(
+            _space.mismatch_message(index, active, reason))
+    if query_dim:
+        index_dim = _index_dim(cg)
+        if index_dim and index_dim != query_dim:
+            raise _width_mismatch(cg, index_dim, query_dim)
+
+
+def space_status(cg: Any) -> Dict[str, Any]:
+    """Index space vs active space, for `awgraph stats` and any host that asks.
+
+    ``match`` is "yes", "no" or "unknown"; ``reason`` says why when it is not a
+    plain yes.
+    """
+    index = getattr(cg, "_index_space", None)
+    active = _active_space()
+    index_dim = _index_dim(cg)
+    verdict, reason = _space.compare(index, active)
+    if (verdict != _space.MISMATCH and index_dim and active.get("dim")
+            and int(index_dim) != int(active["dim"])):
+        verdict = _space.MISMATCH
+        reason = "width {0}-d != {1}-d".format(index_dim, active["dim"])
+    shown = dict(index) if index else {"model": None, "dim": index_dim}
+    if index_dim and not shown.get("dim"):
+        shown["dim"] = index_dim
+    return {
+        "index": {k: shown.get(k) for k in ("model", "dim", "prefix_scheme", "lane", "space")},
+        "index_recorded": bool(index),
+        "active": active,
+        "match": {_space.MATCH: "yes", _space.MISMATCH: "no"}.get(verdict, "unknown"),
+        "reason": reason,
+    }
+
+
+_UNKNOWN_SPACE_WARNED: Set[str] = set()
+
+
+def _load_index_space(cg: Any, cache_path: str, applied: int) -> None:
+    """Attach the cache's space record to ``cg``; say so ONCE when there is none."""
+    record = _space.read_record(cache_path)
+    cg._index_space = record
+    if record is None and applied and cache_path not in _UNKNOWN_SPACE_WARNED:
+        _UNKNOWN_SPACE_WARNED.add(cache_path)
+        logger.warning(
+            "[CodeGraph] %d vectors loaded from %s carry no embedding-space record "
+            "(an index written before space records, or by another tool) -- treated "
+            "as UNKNOWN space: searched as before, checked on vector width only. "
+            "embed_chunks(force=True) rebuilds it with a record.",
+            applied, cache_path,
+        )
+
+
+def _majority_dim(cached: Dict[str, Any]) -> Optional[int]:
+    dims: Dict[int, int] = defaultdict(int)
+    for vec in cached.values():
+        if vec is not None:
+            dims[len(vec)] += 1
+    return max(dims, key=lambda d: dims[d]) if dims else None
+
+
+def _qdrant_fold_refusal(cg: Any, code_index_cls: Any) -> str:
+    """Why this graph's vectors must NOT be written into the host's code index
+    ("" when they may).
+
+    That collection has a second producer and its own reader: the host embeds
+    whatever chunk arrives without a vector, and every query, in the PLATFORM
+    space. A precomputed vector is stored as given, so vectors from another
+    model there are scored against platform-space queries -- a cross-space
+    cosine nobody asked for. (Another width is rejected by the store, which was
+    logged at debug.) Refused on proof only: a width that is not the
+    collection's, or a named model that is not the platform's.
+    """
+    vectors = (getattr(cg, "_space_to_record", None)
+               or getattr(cg, "_index_space", None) or _active_space())
+    have_dim = _index_dim(cg)
+    host_mod = sys.modules.get(getattr(code_index_cls, "__module__", "") or "")
+    target_dim = getattr(host_mod, "EMBED_DIM", None)
+    if (isinstance(target_dim, int) and target_dim > 0 and have_dim
+            and have_dim != target_dim):
+        return ("they are {0}-d ({1}), the collection is {2}-d.".format(
+            have_dim, vectors.get("model") or "unnamed model", target_dim))
+    # The platform's rule, not awgraph's: with AITHER_EMBED_SPACE unset the
+    # platform space IS nomic (lib/core/EmbeddingSpace.py).
+    platform = _space.platform_model(_EMBED_SPACE)
+    family = _space.model_family(vectors.get("model"))
+    if (family and family != _space.HOST_ENGINE_MODEL
+            and family != _space.model_family(platform)):
+        return ("they were embedded with {0}, the platform space is {1}.".format(
+            vectors.get("model"), platform))
+    return ""
+
+
 async def _embed_texts(
-    texts: List[str], model: str = "nomic-embed-text", is_query: bool = False
+    texts: List[str], model: Optional[str] = None, is_query: bool = False
 ) -> List[Optional[list]]:
     """Embed texts via EmbeddingEngine (sentence-transformers -> vLLM).
 
@@ -300,8 +486,23 @@ async def _embed_texts(
     ``is_query=True`` — otherwise CodeRankEmbed embeds the query without its prefix
     and silently mismatches the document space, collapsing retrieval.
     """
+    # None = the active space's model: nomic-embed-text as before, or the
+    # platform model when AITHER_EMBED_SPACE says code-embed (a nomic id is
+    # retired config there). The host engine is free to ignore the name.
+    model = _space.resolve_model(model, _EMBED_SPACE)
     if _code_embed_enabled():
         return await _embed_via_code_service(texts, is_query)
+    if not _HAS_EMBEDDING_ENGINE:
+        # _can_embed_queries() also says yes for a detected vLLM, but no lane
+        # here embeds through one: without this line every text came back None
+        # with nothing logged.
+        _warn_throttled(
+            "embed:no-lane",
+            "[EMBED] no embedding lane can embed text -- set AITHER_CODEGRAPH_EMBED_URL "
+            "+ AITHER_CODEGRAPH_EMBED_MODEL or install a host engine "
+            "(awgraph.plugins.configure(embedding_engine=...)). A detected vLLM is "
+            "used for generation only. Nothing was embedded.",
+        )
     if _HAS_EMBEDDING_ENGINE:
         try:
             engine = get_embedding_engine()
@@ -1750,6 +1951,13 @@ class CodeGraph(BaseFacultyGraph):
 
     _scope_level = "tenant"  # Chunks carry tenant_id for multi-tenant isolation
     _QUERY_CACHE_MAX = 512  # Max cached query embeddings (~1.5MB at 768-dim)
+    #: The space record of the loaded vectors ({model, dim, prefix_scheme, ...}),
+    #: or None for "unknown space" (no vectors, or an index with no record).
+    _index_space: Optional[Dict[str, Any]] = None
+    #: What the next cache write records; None leaves the cache unrecorded.
+    _space_to_record: Optional[Dict[str, Any]] = None
+    #: Why the last semantic_query() produced nothing, when it was a failure.
+    _semantic_miss: Optional[str] = None
 
     def __init__(
         self,
@@ -3343,6 +3551,15 @@ class CodeGraph(BaseFacultyGraph):
             # silently discard every embedding computed so far.
             os.replace(tmp, cache_path)
             _write_pickle_hmac(cache_path)
+            # The space the vectors were embedded in, beside them. A cache whose
+            # origin is unknown stays unrecorded: stamping the active space on
+            # vectors nobody can vouch for would launder a mixed index.
+            _record = getattr(self, "_space_to_record", None)
+            if _record:
+                _space.write_record(
+                    cache_path, dict(_record, dim=_majority_dim(cached) or _record.get("dim")))
+            else:
+                _space.drop_record(cache_path)
             _write_vector_sidecar(cache_path, cached)
             return os.path.getsize(cache_path) / (1024 * 1024)
 
@@ -3350,7 +3567,7 @@ class CodeGraph(BaseFacultyGraph):
 
     async def embed_chunks(
         self,
-        model: str = "nomic-embed-text",
+        model: Optional[str] = None,
         batch_size: int = 64,
         cache_path: Optional[str] = None,
         on_progress: Optional[callable] = None,
@@ -3363,7 +3580,9 @@ class CodeGraph(BaseFacultyGraph):
         Incremental: only embeds chunks that don't have embeddings yet.
 
         Args:
-            model: Embedding model (default: nomic-embed-text, 768-dim)
+            model: Embedding model hint for a host engine (default: the active
+                space's model -- nomic-embed-text unless AITHER_EMBED_SPACE says
+                otherwise). The code-service lane uses its own configured model.
             batch_size: Texts per API call
             cache_path: Where to persist embeddings (default: Library/Data/codegraph_embeddings.pkl)
             on_progress: callback(fraction, message)
@@ -3374,6 +3593,7 @@ class CodeGraph(BaseFacultyGraph):
         """
         if not _can_embed_queries():
             raise RuntimeError("No embedding backend available (need EmbeddingEngine or vLLM)")
+        model = _space.resolve_model(model, _EMBED_SPACE)
 
         if cache_path is None:
             # MUST go through _get_data_path (same helper _save_chunk_cache uses).
@@ -3413,6 +3633,35 @@ class CodeGraph(BaseFacultyGraph):
         # reconcile that lands meanwhile is picked up by the next one
         # (force=False is incremental by design).
         _chunk_items = list(self.chunks.items())
+
+        # ── Embedding space ───────────────────────────────────────────────
+        # An incremental pass ADDS vectors to the ones already there. If those
+        # were embedded by another model the result is one index in two spaces
+        # (2026-07-21: 61,758 nomic rows beside 39,579 code-model rows, queries
+        # matching half the corpus). Known-and-different is refused here;
+        # unknown (an older cache) proceeds as it always did, stays unrecorded,
+        # and is still stopped below if the new vectors come back another width.
+        _active = _active_space()
+        _prior = None if force else (
+            _space.read_record(cache_path) if os.path.exists(cache_path)
+            else None) or getattr(self, "_index_space", None)
+        _had_vectors = (not force) and (bool(cached) or any(
+            c.embedding is not None for _, c in _chunk_items))
+        if _had_vectors:
+            _verdict, _why = _space.compare(_prior, _active)
+            if _verdict == _space.MISMATCH:
+                raise _space.EmbeddingSpaceMismatch(_space.mismatch_message(
+                    _prior, _active, _why, "add vectors"))
+            if _prior is None:
+                _warn_throttled(
+                    "embed:unknown-space:" + cache_path,
+                    "[EMBED] the existing vectors carry no embedding-space record -- "
+                    "adding to them as before; the cache stays UNRECORDED until "
+                    "embed_chunks(force=True) rebuilds it in one known space.",
+                    every=0,
+                )
+        self._space_to_record = (
+            dict(_active) if (not _had_vectors or _prior is not None) else None)
 
         # Apply cached embeddings to current chunks — compacted to float32 rows
         # on the way in, and the compact row is shared back into `cached` so the
@@ -3459,6 +3708,16 @@ class CodeGraph(BaseFacultyGraph):
             for _, _c in _chunk_items:
                 _c.embedding = None
 
+        # The width every vector of this index must have: the one already there,
+        # else whatever the first new vector measures.
+        _expected_dim: Optional[int] = None
+        for _, _c in _chunk_items:
+            if _c.embedding is not None:
+                _expected_dim = len(_c.embedding)
+                break
+        if _expected_dim and _active.get("dim") and _expected_dim != _active["dim"]:
+            raise _width_mismatch(self, _expected_dim, int(_active["dim"]), "add vectors")
+
         # Find chunks needing embeddings
         need_embedding = [
             (cid, chunk) for cid, chunk in _chunk_items
@@ -3484,8 +3743,10 @@ class CodeGraph(BaseFacultyGraph):
             chunk_ids.append(cid)
 
         start = time.perf_counter()
-        backend = "vLLM" if _detect_vllm() else "EmbeddingEngine"
-        logger.info(f"Embedding {len(need_embedding)} chunks via {backend}")
+        logger.info(
+            f"Embedding {len(need_embedding)} chunks via {_active.get('lane')} "
+            f"({_space.describe(_active)})"
+        )
         total_batches = (len(texts) + batch_size - 1) // batch_size
 
         batches = []
@@ -3542,6 +3803,13 @@ class CodeGraph(BaseFacultyGraph):
                     if _i >= len(chunk_ids) or _emb is None:
                         continue
                     _cid = chunk_ids[_i]
+                    if _expected_dim is None:
+                        _expected_dim = len(_emb)
+                    elif len(_emb) != _expected_dim:
+                        # Never store it: one row of another width makes the
+                        # whole index unsearchable (or, without numpy, silently
+                        # scored on a truncated vector).
+                        raise _width_mismatch(self, _expected_dim, len(_emb), "add vectors")
                     # float32 row, not the raw list — one shared object on the
                     # chunk AND in the checkpoint dict (~3KB vs ~25KB each)
                     self.chunks[_cid].embedding = _as_f32(_emb)
@@ -3554,6 +3822,8 @@ class CodeGraph(BaseFacultyGraph):
                 logger.warning(f"Embedding batch {idx+1}/{total_batches} timed out (30s)")
                 results[idx] = "failed"
                 consecutive_failures += 1
+            except _space.EmbeddingSpaceMismatch:
+                raise  # a refusal, not a flaky batch: never retried, never swallowed
             except Exception as e:
                 logger.error(f"Embedding batch {idx+1}/{total_batches} failed: {e}")
                 results[idx] = "failed"
@@ -3593,6 +3863,10 @@ class CodeGraph(BaseFacultyGraph):
         if new_count > 0:
             self._has_embeddings_cached = True  # Invalidate hybrid_query fast-path cache
             self._invalidate_embedding_matrix()  # Force matrix rebuild on next query
+        if self._space_to_record is not None:
+            self._space_to_record["dim"] = _expected_dim or self._space_to_record.get("dim")
+            if new_count > 0 or _had_vectors:
+                self._index_space = dict(self._space_to_record)
 
         # ── CodeIndex Qdrant fold (leak path #1) ──────────────────────────
         # Persist embeddings to Qdrant for cross-process semantic search.
@@ -3616,7 +3890,10 @@ class CodeGraph(BaseFacultyGraph):
             "failed": len(need_embedding) - new_count,
             "embed_ms": embed_ms,
             "batches": total_batches,
-            "model": model,
+            # the model that actually embedded: the code-service lane has its
+            # own, whatever hint was passed in
+            "model": _active.get("model") or model,
+            "dim": _expected_dim,
         }
         logger.info(f"Embedding complete: {stats}")
         return stats
@@ -3633,6 +3910,15 @@ class CodeGraph(BaseFacultyGraph):
             logger.debug("[CodeGraph] no code_index hook — skipping Qdrant persist")
             return
         CodeIndex, IndexScope = _ci()  # noqa: N806 - host classes, imported spelling kept
+
+        _skip = _qdrant_fold_refusal(self, CodeIndex)
+        if _skip:
+            _warn_throttled(
+                "qdrant-fold:" + _skip,
+                "[CodeGraph] vectors NOT folded into the host code index: " + _skip
+                + " The host's own indexer still embeds that collection in its space.",
+            )
+            return
 
         # Group chunks by the FULL scope tuple (tenant, workspace, user, agent)
         # so user/agent-private code is never merged into a broader scope — a
@@ -3705,14 +3991,18 @@ class CodeGraph(BaseFacultyGraph):
         self,
         query: str,
         max_results: int = 10,
-        model: str = "nomic-embed-text",
+        model: Optional[str] = None,
     ) -> List[Tuple[float, "CodeChunk"]]:
         """
         Semantic search using embedding cosine similarity.
 
         Returns list of (similarity_score, chunk) sorted descending.
         Requires embed_chunks() to have been called first.
+
+        Raises EmbeddingSpaceMismatch when the index was embedded by another
+        model, or the query vector is not as wide as the index's vectors.
         """
+        self._semantic_miss = None
         if not _can_embed_queries():
             return []
 
@@ -3724,20 +4014,30 @@ class CodeGraph(BaseFacultyGraph):
             logger.warning("No embeddings available — call embed_chunks() first")
             return []
 
+        # Refuse BEFORE spending a request when the record already proves it.
+        _refuse_space_mismatch(self)
+
         query_vec = self._query_embed_cache.get(query)
         if query_vec is None:
             try:
                 vecs = await _embed_texts([query], model=model, is_query=True)
                 query_vec = vecs[0] if vecs else None
-                if not query_vec:
+                if query_vec is None or len(query_vec) == 0:
+                    # NOT "no results": the lane produced no vector. The caller
+                    # must be able to tell the two apart.
+                    self._semantic_miss = "the embedding lane returned no query vector"
                     return []
                 # Cache for next time
                 self._cache_query_embedding(query, query_vec)
             except Exception as e:
                 logger.error(f"Failed to embed query: {e}")
+                self._semantic_miss = f"embedding the query failed: {e}"
                 return []
         else:
             logger.debug(f"[SEMANTIC] Query embedding cache HIT for: {query[:40]}")
+
+        # ...and on the vector in hand: its width against the index's.
+        _refuse_space_mismatch(self, len(query_vec))
 
         if _HAS_NUMPY:
             # Use pre-computed matrix (avoids ~2500ms np.array construction per query)
@@ -3811,10 +4111,23 @@ class CodeGraph(BaseFacultyGraph):
         if not embedded:
             return
         t0 = time.time()
+        try:
+            matrix = np.array([c.embedding for _, c in embedded], dtype=np.float32)
+        except ValueError as e:
+            widths: Dict[int, int] = defaultdict(int)
+            for _, c in embedded:
+                widths[len(c.embedding)] += 1
+            if len(widths) < 2:
+                raise
+            # Rows of different widths: two embedding spaces in one index.
+            raise _space.EmbeddingSpaceMismatch(
+                "refusing to search an index that mixes embedding spaces -- its "
+                "vectors have different widths ({0}). {1}".format(
+                    ", ".join("%d-d x %d" % (w, n) for w, n in sorted(widths.items())),
+                    _space.REBUILD_HINT)
+            ) from e
         self._embedding_ids = [cid for cid, _ in embedded]
-        self._embedding_matrix = np.array(
-            [c.embedding for _, c in embedded], dtype=np.float32
-        )
+        self._embedding_matrix = matrix
         self._embedding_norms = np.linalg.norm(self._embedding_matrix, axis=1)
         # Test-file penalty as a vector, computed once here rather than as a
         # per-query Python loop over every embedded chunk in semantic_query().
@@ -4195,16 +4508,38 @@ class CodeGraph(BaseFacultyGraph):
         """
         if not _can_embed_queries():
             return chunks[:top_k]
+        _refuse_space_mismatch(self)
 
-        # Embed the query via EmbeddingEngine
+        # Embed the query via the active lane (the query cache first: hybrid_query
+        # has usually just embedded this exact text)
+        query_vec = getattr(self, "_query_embed_cache", {}).get(query)
         try:
-            vecs = await _embed_texts([query], model="nomic-embed-text", is_query=True)
-            query_vec = vecs[0] if vecs else None
-            if not query_vec:
+            if query_vec is None:
+                vecs = await _embed_texts([query], is_query=True)
+                query_vec = vecs[0] if vecs else None
+            if query_vec is None or len(query_vec) == 0:
+                _warn_throttled(
+                    "rerank:no-query-vector",
+                    "[RERANK] the embedding lane returned no query vector -- "
+                    "candidates keep their incoming order (no semantic re-rank).",
+                )
                 return chunks[:top_k]
         except Exception as e:
-            logger.debug(f"Embedding re-rank failed (query embed): {e}")
+            _warn_throttled(
+                "rerank:embed-failed",
+                f"[RERANK] embedding the query failed ({e}) -- candidates keep "
+                "their incoming order (no semantic re-rank).",
+            )
             return chunks[:top_k]
+
+        # Same refusal as semantic_query: a candidate vector of another width is
+        # another space, never something to score (zip() would truncate it).
+        for _c in chunks:
+            _e = _c.embedding
+            if _e is not None:
+                if len(_e) != len(query_vec):
+                    raise _width_mismatch(self, len(_e), len(query_vec))
+                break
 
         if _HAS_NUMPY:
             qv = np.array(query_vec, dtype=np.float32)
@@ -4478,6 +4813,11 @@ class CodeGraph(BaseFacultyGraph):
                 )
             return _collapse_duplicate_bodies(keyword_results)[:max_results]
 
+        # A search across embedding spaces is REFUSED, not downgraded: keyword
+        # hits returned in its place look exactly like an answer and hide that
+        # the index needs a rebuild. Raises EmbeddingSpaceMismatch.
+        _refuse_space_mismatch(self)
+
         # Run semantic search.
         # If query embedding is cached: cosine math only (~1ms) — always succeeds.
         # If uncached: embed round-trip + cosine over the full matrix, then fire a
@@ -4513,6 +4853,8 @@ class CodeGraph(BaseFacultyGraph):
         if _HAS_NUMPY and self._embedding_matrix is None:
             try:
                 await self._ensure_embedding_matrix_async()
+            except _space.EmbeddingSpaceMismatch:
+                raise
             except Exception as e:
                 logger.warning(f"[HYBRID] embedding matrix build failed: {e}")
 
@@ -4522,9 +4864,23 @@ class CodeGraph(BaseFacultyGraph):
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            logger.debug("[HYBRID] Semantic timed out — keyword-only + background cache warmup")
+            # Said at WARNING (throttled): at debug this downgrade was invisible.
+            _warn_throttled(
+                "hybrid:timeout",
+                f"[HYBRID] semantic search exceeded {timeout:.1f}s -- answering "
+                "KEYWORD-ONLY for this query; the query vector is being cached in "
+                "the background for the next call.",
+            )
             self._background_cache_query(query)  # Next time will be a cache hit
             semantic_results = None
+        else:
+            _miss = getattr(self, "_semantic_miss", None)
+            if _miss:
+                _warn_throttled(
+                    "hybrid:no-query-vector",
+                    f"[HYBRID] {_miss} -- answering KEYWORD-ONLY. The results look "
+                    "plausible; the vector index was not consulted.",
+                )
         if not semantic_results:
             if not cache_hit:
                 self._background_cache_query(query)  # Pre-cache for next call
@@ -5034,6 +5390,7 @@ def get_codegraph(
                                 f"cache entries at boot (chunk ids no longer in the index)"
                             )
                         logger.info(f"[CodeGraph] Loaded {applied} embeddings from cache")
+                        _load_index_space(cg, embed_path, applied)
                     except Exception as e:
                         logger.warning(f"[CodeGraph] Embedding cache load failed: {e}")
 
@@ -5297,6 +5654,7 @@ def _hydrate_embeddings(cg: "CodeGraph", cache_path: Optional[str] = None) -> in
                 applied += 1
         if applied:
             cg._has_embeddings_cached = True
+        _load_index_space(cg, path, applied)
         return applied
     if not _verify_pickle_hmac(path):
         logger.warning("[CodeGraph] Embedding cache HMAC invalid — queries stay keyword-only")
@@ -5316,6 +5674,7 @@ def _hydrate_embeddings(cg: "CodeGraph", cache_path: Optional[str] = None) -> in
                 applied += 1
     if applied:
         cg._has_embeddings_cached = True
+    _load_index_space(cg, path, applied)
     # An older cache: write the mmap sidecar now so this is the last boxed-float read.
     _write_vector_sidecar(path, cached)
     return applied

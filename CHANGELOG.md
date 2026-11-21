@@ -5,6 +5,41 @@ All notable changes to awgraph are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- An embedding pass records the space it ran in beside the vector cache
+  (`codegraph_embeddings.pkl.space.json`: model, width, query-prefix scheme, lane),
+  stamped with the cache's mtime and size. `awgraph stats` prints
+  `embedding space: index = ... | active = ... | match: yes|NO|unknown`
+  (`embedding_space` in `--json`).
+- `AITHER_EMBED_SPACE` (`nomic` | `aither-code-embed`, the platform's switch) is
+  honoured: the model asked of a host engine and the code-service lane's model
+  follow it, and a nomic model id in the code-embed space is treated as retired
+  config. Unset, every default is unchanged. An unknown value raises.
+
+### Changed
+- A search across embedding spaces is REFUSED with `EmbeddingSpaceMismatch`
+  (`awgraph query` exits 2) instead of answered: the index's recorded model differs
+  from the active one, the query vector is not as wide as the index's vectors, or
+  the index holds vectors of two widths. The message names both spaces and the
+  rebuild (`embed_chunks(force=True)`). Before, a same-width foreign model was
+  scored as if comparable, a different width raised numpy's shape error (or,
+  without numpy, was scored on a truncated vector).
+- An incremental `embed_chunks` refuses to add vectors to an index recorded in
+  another space, and never stores a vector whose width differs from the index's.
+- An index with no record (written before this release, or by another tool) loads
+  as "unknown space": searched as before, checked on vector width only, one warning.
+
+### Fixed
+- A query that could not be embedded (lane unreachable, timeout) answered
+  keyword-only with nothing logged above debug; it now warns, at most once a
+  minute per cause. A detected vLLM counted as "can embed" while no lane embeds
+  through one, so every text came back empty without a line; that is logged too.
+- `embed_chunks` stats reported the `model` hint (`nomic-embed-text`) even when
+  the code-service lane embedded with another model; it reports the lane's model
+  and the measured `dim`.
+
 ## [1.4.20] - 2026-11-08
 
 ### Added

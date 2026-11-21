@@ -180,7 +180,13 @@ async def cmd_query(args: argparse.Namespace) -> int:
     graph, ok = await _open_graph(root, build=False, hydrate=query_lane_available())
     if not ok:
         return _fail("no index for " + root + " — run: awgraph index " + args.path)
-    chunks = await graph.hybrid_query(text, max_results=args.k)
+    from awgraph.space import EmbeddingSpaceMismatch
+
+    try:
+        chunks = await graph.hybrid_query(text, max_results=args.k)
+    except EmbeddingSpaceMismatch as exc:
+        # Exit 2, not 1: no search ran, so "no matches" would be a false negative.
+        return _fail(str(exc))
     chunks = await _tokengate_filter(text, chunks)
     return _print_rows([_chunk_row(c, root) for c in chunks], args.json)
 
@@ -305,6 +311,43 @@ async def _edges(args: argparse.Namespace, direction: str) -> int:
     return _print_rows(rows, args.json)
 
 
+def _space_status(graph: Any) -> dict:
+    """Index space vs active space; never raises (stats must always print)."""
+    try:
+        from awgraph.graph import space_status
+
+        return space_status(graph)
+    except Exception as exc:  # noqa: BLE001 -- e.g. an unknown AITHER_EMBED_SPACE
+        return {"index": {}, "index_recorded": False, "active": {},
+                "match": "unknown", "reason": str(exc)}
+
+
+def _space_lines(status: dict, embedded: int) -> List[str]:
+    """The `stats` lines that answer: would a query search the space it was built in?"""
+    from awgraph import space
+
+    active = status.get("active") or {}
+    if embedded == 0:
+        index_text = "no vectors"
+    elif status.get("index_recorded"):
+        index_text = space.describe(status.get("index"))
+    else:
+        dim = (status.get("index") or {}).get("dim")
+        index_text = "unknown space (no space record){0}".format(
+            ", %d-d" % dim if dim else "")
+    active_text = (space.describe(active) + " via " + str(active.get("lane"))
+                   if active.get("model") else "no embedding lane")
+    match = status.get("match", "unknown")
+    reason = status.get("reason") or ""
+    lines = ["embedding space: index = {0} | active = {1} | match: {2}{3}".format(
+        index_text, active_text, match.upper() if match == "no" else match,
+        " (" + reason + ")" if reason else "")]
+    if match == "no":
+        lines.append("  semantic search is REFUSED until the index is rebuilt: "
+                     + space.REBUILD_HINT)
+    return lines
+
+
 async def cmd_stats(args: argparse.Namespace) -> int:
     root = os.path.abspath(args.path)
     graph, ok = await _open_graph(root, build=False)
@@ -327,6 +370,7 @@ async def cmd_stats(args: argparse.Namespace) -> int:
         "files": len(getattr(graph, "by_file", {}) or {}),
         "embedded_chunks": embedded,
         "embedding_coverage": coverage,
+        "embedding_space": _space_status(graph),
     }
     if args.json:
         print(json.dumps(out, indent=2))
@@ -345,6 +389,8 @@ async def cmd_stats(args: argparse.Namespace) -> int:
     if embedded == 0:
         print("  note: no embeddings — queries are keyword-only "
               "(see README: embeddings)")
+    for line in _space_lines(out["embedding_space"], embedded):
+        print(line)
     return EXIT_OK
 
 
