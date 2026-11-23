@@ -3898,6 +3898,39 @@ class CodeGraph(BaseFacultyGraph):
         logger.info(f"Embedding complete: {stats}")
         return stats
 
+    @staticmethod
+    def _build_qdrant_chunk_dicts(chunks) -> list:
+        """CPU-bound: turn float32 embedding rows into plain JSON floats.
+
+        Kept OFF the event loop (called through the host offload door) so a
+        large index never spends minutes inside ``float(v) for v in _emb``
+        while the loop is blocked — exactly where the loop watchdog sampled a
+        46-minute stall once the embedder stopped answering. It touches no
+        loop-scheduled state, so it is safe to run on a worker thread.
+        """
+        out = []
+        for chunk in chunks:
+            _emb = chunk.embedding
+            if _emb is None:
+                continue
+            out.append({
+                "file_path": chunk.source_path,
+                "start_line": chunk.start_line,
+                "end_line": chunk.end_line,
+                "symbol": chunk.name,
+                "chunk_type": chunk.chunk_type.value,
+                "content": "\n".join([
+                    chunk.signature,
+                    chunk.docstring or "",
+                    chunk.body_preview or "",
+                ]).strip(),
+                # JSON boundary: embeddings are float32 rows (ndarray /
+                # array('f')) in memory now — convert to plain floats here
+                "vector": [float(v) for v in _emb],
+                "commit_stamp": "",  # CodeGraph doesn't track git stamps
+            })
+        return out
+
     async def _persist_to_qdrant(self, batch_size: int = 64) -> None:
         """Persist embedded chunks to Qdrant via CodeIndex (best-effort).
 
@@ -3934,9 +3967,17 @@ class CodeGraph(BaseFacultyGraph):
                          getattr(chunk, "agent_id", "") or "")
             by_scope.setdefault(scope_key, []).append(chunk)
 
-        # Upsert each scope's chunks
+        # Upsert each scope's chunks. The float() conversion is CPU-bound over
+        # the whole index; run it through the host offload door (a bare thread
+        # loses loop-scheduled tasks — the host offload stamps the loop into a
+        # ContextVar) so it cannot stall the loop. A slow or unreachable
+        # Qdrant is bounded by a timeout and SKIPPED with a counted warning
+        # rather than blocking the caller indefinitely.
         index = CodeIndex()
         total_upserted = 0
+        _offload = _plugins.offload()
+        _loop = asyncio.get_running_loop()
+        _persist_timeout = float(os.getenv("AITHER_CODEGRAPH_QDRANT_TIMEOUT", "20"))
         for (tenant_id, workspace_id, user_id, agent_id), chunks in by_scope.items():
             try:
                 scope = IndexScope(
@@ -3945,31 +3986,28 @@ class CodeGraph(BaseFacultyGraph):
                     user_id=user_id,
                     agent_id=agent_id,
                 )
-                # Build chunk dicts for upsert
-                chunk_dicts = []
-                for chunk in chunks:
-                    _emb = chunk.embedding
-                    if _emb is None:
-                        continue
-                    chunk_dicts.append({
-                        "file_path": chunk.source_path,
-                        "start_line": chunk.start_line,
-                        "end_line": chunk.end_line,
-                        "symbol": chunk.name,
-                        "chunk_type": chunk.chunk_type.value,
-                        "content": "\n".join([
-                            chunk.signature,
-                            chunk.docstring or "",
-                            chunk.body_preview or "",
-                        ]).strip(),
-                        # JSON boundary: embeddings are float32 rows (ndarray /
-                        # array('f')) in memory now — convert to plain floats here
-                        "vector": [float(v) for v in _emb],
-                        "commit_stamp": "",  # CodeGraph doesn't track git stamps
-                    })
+                if _offload is not None:
+                    chunk_dicts = await _offload(self._build_qdrant_chunk_dicts, chunks)
+                else:
+                    chunk_dicts = await _loop.run_in_executor(
+                        None, self._build_qdrant_chunk_dicts, chunks,
+                    )
                 if chunk_dicts:
-                    upserted = await index.upsert_chunks(chunk_dicts, scope=scope)
+                    upserted = await asyncio.wait_for(
+                        index.upsert_chunks(chunk_dicts, scope=scope),
+                        timeout=_persist_timeout,
+                    )
                     total_upserted += upserted
+            except asyncio.TimeoutError:
+                self._qdrant_persist_timeouts = getattr(
+                    self, "_qdrant_persist_timeouts", 0) + 1
+                _warn_throttled(
+                    "qdrant-persist-timeout",
+                    f"[CodeGraph] Qdrant persist exceeded {_persist_timeout:.0f}s "
+                    f"and was SKIPPED for scope {tenant_id!r} "
+                    f"(skipped so far: {self._qdrant_persist_timeouts}); "
+                    "the on-disk embedding cache is unaffected.",
+                )
             except Exception as exc:  # noqa: BLE001 — Qdrant persist is best-effort
                 logger.debug(
                     "[CodeGraph] Qdrant upsert failed for scope %s/%s: %s",

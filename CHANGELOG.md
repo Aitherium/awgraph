@@ -40,6 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the code-service lane embedded with another model; it reports the lane's model
   and the measured `dim`.
 
+## [1.4.21] - 2026-11-23
+
+### Fixed
+- The Qdrant fold no longer runs its CPU-bound `float()` conversion of every
+  embedding row on the event loop, and the persist is bounded. The conversion
+  now runs through the host offload door (`EventLoopMonitor.offload`), and a
+  Qdrant upsert slower than `AITHER_CODEGRAPH_QDRANT_TIMEOUT` (default 20 s) is
+  SKIPPED with a counted, throttled warning instead of blocking the caller.
+  Before, a dead or slow embedder left the loop sampled inside
+  `_persist_to_qdrant` for ~46 minutes, failing every healthcheck on the process.
+
 ## [1.4.20] - 2026-11-08
 
 ### Added
