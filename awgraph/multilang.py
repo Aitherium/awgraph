@@ -45,6 +45,75 @@ from typing import Dict, List, Optional, Set, Tuple
 
 _PARSER = None
 _UNAVAILABLE: Optional[str] = None
+_BACKEND: Optional[str] = None
+
+#: Zero-dependency fallback extension map used when optional ``repowise`` is
+#: not installed. Covers TS/JS, Go, Rust, shell, and symbol-less docs/configs so
+#: mixed repositories are never silently reduced to Python-only indexing.
+_BUILTIN_EXTENSION_TO_LANGUAGE: Dict[str, str] = {
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".mts": "typescript",
+    ".cts": "typescript",
+    ".js": "javascript",
+    ".jsx": "jsx",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".go": "go",
+    ".rs": "rust",
+    ".sh": "bash",
+    ".bash": "bash",
+    ".zsh": "bash",
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".adoc": "asciidoc",
+    ".asciidoc": "asciidoc",
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".ini": "ini",
+    ".csv": "csv",
+    ".txt": "text",
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".xml": "xml",
+    ".sql": "sql",
+}
+
+_TS_JS_LANGUAGES: Set[str] = {"typescript", "tsx", "javascript", "jsx"}
+_MAX_BUILTIN_LINE_LEN = 2000
+
+_TS_JS_PATTERNS: Tuple[Tuple["re.Pattern[str]", str], ...] = (
+    (re.compile(r"^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)\s*(?:<|\()"), "function"),
+    (re.compile(r"^\s*(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)"), "class"),
+    (re.compile(r"^\s*(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)"), "interface"),
+    (re.compile(r"^\s*(?:export\s+)?enum\s+([A-Za-z_$][\w$]*)"), "enum"),
+    (re.compile(r"^\s*(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*(?:<[^=]*>)?\s*="), "type"),
+    (re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>"), "function"),
+    (re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\b"), "function"),
+)
+
+_GO_PATTERNS: Tuple[Tuple["re.Pattern[str]", str], ...] = (
+    (re.compile(r"^\s*func\s+\([^)]+\)\s+([A-Za-z_]\w*)\s*(?:\[|\()"), "method"),
+    (re.compile(r"^\s*func\s+([A-Za-z_]\w*)\s*(?:\[|\()"), "function"),
+    (re.compile(r"^\s*type\s+([A-Za-z_]\w*)\s+(?:struct|interface)\b"), "type"),
+)
+
+_RUST_PATTERNS: Tuple[Tuple["re.Pattern[str]", str], ...] = (
+    (re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:default\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+\"[^\"]*\"\s+)?fn\s+([A-Za-z_]\w*)\s*(?:<|\()"), "function"),
+    (re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Za-z_]\w*)"), "struct"),
+    (re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+([A-Za-z_]\w*)"), "enum"),
+    (re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?trait\s+([A-Za-z_]\w*)"), "trait"),
+    (re.compile(r"^\s*(?:unsafe\s+)?impl(?:<[^>]*>)?\s+(?:[A-Za-z_][\w:<>]*\s+for\s+)?([A-Za-z_][\w:]*)"), "impl"),
+    (re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_]\w*)\s*\{"), "module"),
+)
+
+_BASH_PATTERNS: Tuple[Tuple["re.Pattern[str]", str], ...] = (
+    (re.compile(r"^\s*function\s+([A-Za-z_][\w-]*)\s*(?:\(\s*\))?\s*\{"), "function"),
+    (re.compile(r"^\s*([A-Za-z_][\w-]*)\s*\(\s*\)\s*\{"), "function"),
+)
 
 #: Languages repowise recognises but extracts no symbols from. A merge engine
 #: drops these; a retrieval index chunks them as prose instead (see module doc).
@@ -99,28 +168,34 @@ def index_extensions(extra: Optional[Set[str]] = None,
 
 
 def available() -> Tuple[bool, str]:
-    """(usable, why-not). Never raises: absence is a fallback, not a failure."""
-    global _PARSER, _UNAVAILABLE
-    if _PARSER is not None:
+    """(usable, detail). Uses ``repowise`` when installed, else builtin stdlib parser."""
+    global _PARSER, _UNAVAILABLE, _BACKEND
+    if _BACKEND == "repowise":
         return True, ""
-    if _UNAVAILABLE is not None:
-        return False, _UNAVAILABLE
+    if _BACKEND == "builtin":
+        return True, "builtin"
     try:
         from repowise.core.ingestion import ASTParser  # noqa: PLC0415
 
         _PARSER = ASTParser()
+        _BACKEND = "repowise"
         return True, ""
-    except Exception as exc:  # noqa: BLE001 - any failure means "not usable"
+    except Exception as exc:  # noqa: BLE001 - absence falls back cleanly to builtin
         _UNAVAILABLE = f"{type(exc).__name__}: {exc}"
-        return False, _UNAVAILABLE
+        _BACKEND = "builtin"
+        return True, "builtin"
 
 
 def _extension_map() -> Dict[str, str]:
-    try:
-        from repowise.core.ingestion import EXTENSION_TO_LANGUAGE  # noqa: PLC0415
-    except Exception:  # noqa: BLE001
-        return {}
-    return dict(EXTENSION_TO_LANGUAGE)
+    available()
+    if _BACKEND == "repowise":
+        try:
+            from repowise.core.ingestion import EXTENSION_TO_LANGUAGE  # noqa: PLC0415
+
+            return dict(EXTENSION_TO_LANGUAGE)
+        except Exception:  # noqa: BLE001
+            pass
+    return dict(_BUILTIN_EXTENSION_TO_LANGUAGE)
 
 
 def language_for(path: str) -> Optional[str]:
@@ -186,12 +261,111 @@ def _strip_path_prefix(name: str, prefix: str) -> str:
     return name
 
 
+def _brace_delta(line: str) -> Tuple[int, bool]:
+    """Return ``(net_brace_delta, saw_open_brace)`` while skipping strings and ``//`` comments."""
+    depth = 0
+    saw_open = False
+    quote: Optional[str] = None
+    escaped = False
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and line[i + 1] == "/":
+            break
+        if ch in ("'", '"', "`"):
+            quote = ch
+        elif ch == "{":
+            depth += 1
+            saw_open = True
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    return depth, saw_open
+
+
+def _find_block_end(lines: List[str], start_idx: int) -> int:
+    """Find 1-based inclusive end line for a brace-delimited symbol starting at ``start_idx``."""
+    depth = 0
+    opened = False
+    limit = min(len(lines), start_idx + 2000)
+    for idx in range(start_idx, limit):
+        delta, saw_open = _brace_delta(lines[idx])
+        if saw_open:
+            opened = True
+        depth += delta
+        if opened and depth <= 0:
+            return idx + 1
+        if not opened and idx - start_idx >= 5:
+            return start_idx + 1
+    return min(len(lines), start_idx + 1)
+
+
+def _builtin_parse_symbols(content: bytes, path: str, lang: str) -> List[dict]:
+    """Zero-dependency line-oriented symbol extractor for TS/JS, Go, Rust, and shell."""
+    if not content or b"\x00" in content:
+        return []
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return []
+    lines = text.splitlines()
+    if not lines or any(len(ln) > _MAX_BUILTIN_LINE_LEN for ln in lines[:20]):
+        return []
+
+    if lang in _TS_JS_LANGUAGES:
+        patterns = _TS_JS_PATTERNS
+    elif lang == "go":
+        patterns = _GO_PATTERNS
+    elif lang == "rust":
+        patterns = _RUST_PATTERNS
+    elif lang == "bash":
+        patterns = _BASH_PATTERNS
+    else:
+        return []
+
+    out: List[dict] = []
+    seen: Set[Tuple[str, int]] = set()
+    for idx, line in enumerate(lines):
+        if len(line) > _MAX_BUILTIN_LINE_LEN:
+            continue
+        for pat, kind in patterns:
+            m = pat.match(line)
+            if not m:
+                continue
+            name = m.group(1)
+            start_line = idx + 1
+            if (name, start_line) in seen:
+                break
+            seen.add((name, start_line))
+            end_line = _find_block_end(lines, idx)
+            out.append({
+                "name": name,
+                "kind": kind,
+                "start_line": start_line,
+                "end_line": end_line,
+                "language": lang,
+                "symbol_id": f"{path}::{name}",
+            })
+            break
+    return out
+
+
 def parse_symbols(content: bytes, path: str) -> List[dict]:
     """Symbols in `content`, or [] when it cannot parse.
 
-    Returns name/kind/start_line/end_line/language/symbol_id dicts. The
-    symbol_id is repowise's ``path::qualified_name``, which survives a move —
-    that is why it is carried through instead of a body hash.
+    Returns name/kind/start_line/end_line/language/symbol_id dicts. Prefers
+    repowise when installed; falls back to the stdlib parser for TS/JS/Go/Rust
+    and shell otherwise.
     """
     ok, _ = available()
     if not ok:
@@ -199,6 +373,8 @@ def parse_symbols(content: bytes, path: str) -> List[dict]:
     lang = language_for(path)
     if not lang or lang in SYMBOL_LESS_LANGUAGES:
         return []
+    if _BACKEND != "repowise" or _PARSER is None:
+        return _builtin_parse_symbols(content, path, lang)
     try:
         from repowise.core.ingestion import FileInfo  # noqa: PLC0415
 
