@@ -19,7 +19,7 @@ dependencies = [
 numpy = ["numpy>=1.21.0"]
 
 # Development and testing
-dev = ["pytest>=7.0", "pytest-asyncio>=0.21.0"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21.0", "numpy>=1.21.0"]
 
 # `awgraph mcp` — serve the graph to any MCP coding agent (Claude Code, Cursor,
 # Windsurf, Zed) over stdio. Optional because the library and CLI need nothing
