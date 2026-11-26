@@ -290,7 +290,9 @@ def test_query_prefix_change_is_reported_not_refused():
 
 def test_embed_pass_records_the_space_and_a_reload_enforces_it(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
-        graph = _indexed(tmp)
+        src = Path(tmp) / "src"
+        src.mkdir()
+        graph = _indexed(str(src))
         cache = Path(tmp) / "emb.pkl"
         _code_lane(monkeypatch, "aither-code-embed", 4)
         monkeypatch.setenv("AITHER_CODEGRAPH_QDRANT_PERSIST", "0")
@@ -301,7 +303,7 @@ def test_embed_pass_records_the_space_and_a_reload_enforces_it(monkeypatch):
         assert record and record["model"] == "aither-code-embed" and record["dim"] == 4
         assert record["prefix_scheme"].startswith("doc:plain|query:prefix-sha256:")
 
-        reopened = _indexed(tmp)
+        reopened = _indexed(str(src))
         assert _hydrate_embeddings(reopened, cache_path=str(cache)) == len(reopened.chunks)
         assert reopened._index_space["model"] == "aither-code-embed"
         assert asyncio.run(reopened.semantic_query("retry backoff"))     # same space: answers
@@ -333,14 +335,16 @@ def test_a_cache_rewritten_by_another_tool_reads_as_unknown(monkeypatch):
 
 def test_old_index_loads_as_unknown_with_one_warning(monkeypatch, caplog):
     with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "src"
+        src.mkdir()
         cache = Path(tmp) / "emb.pkl"
-        first = _indexed(tmp)
+        first = _indexed(str(src))
         _write_cache(cache, {cid: [0.5, 0.1, 0.2, 0.3] for cid in first.chunks})
         _code_lane(monkeypatch, "aither-code-embed", 4)
 
         with caplog.at_level(logging.WARNING, logger=g.logger.name):
             assert _hydrate_embeddings(first, cache_path=str(cache)) == len(first.chunks)
-            second = _indexed(tmp)
+            second = _indexed(str(src))
             assert _hydrate_embeddings(second, cache_path=str(cache)) == len(second.chunks)
         warned = [r for r in caplog.records if "UNKNOWN space" in r.getMessage()]
         assert len(warned) == 1, [r.getMessage() for r in caplog.records]
